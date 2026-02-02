@@ -206,13 +206,117 @@
     },
     {
       "parameters": {
-        "jsCode": "// Parse and enhance AI-generated caption\nconst response = $input.item.json.message.content;\nconst parsed = JSON.parse(response);\nconst assetData = $('Smart Asset Selection').item.json;\n\n// Build final Instagram caption\nconst finalCaption = `${parsed.hook}\n\n${parsed.body}\n\n${parsed.cta}\n\n${parsed.hashtags.join(' ')}`;\n\n// Validate caption length (Instagram limit: 2200 characters)\nif (finalCaption.length > 2200) {\n  console.warn(`Caption too long (${finalCaption.length} chars), truncating...`);\n  const truncated = finalCaption.substring(0, 2150);\n  const lastSpace = truncated.lastIndexOf(' ');\n  return [{\n    json: {\n      ...parsed,\n      final_caption: truncated.substring(0, lastSpace) + '... ✨',\n      truncated: true,\n      original_length: finalCaption.length\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    hook: parsed.hook,\n    body: parsed.body,\n    cta: parsed.cta,\n    hashtags: parsed.hashtags,\n    final_caption: finalCaption,\n    engagement_prediction: parsed.engagement_prediction || 0.035,\n    caption_length: finalCaption.length,\n    hashtag_count: parsed.hashtags.length,\n    truncated: false\n  }\n}];"
+        "method": "POST",
+        "url": "http://langchain-agent:3002/approve/post",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.AGENT_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "jsonBody": "={{ JSON.stringify({\n  \"scheduled_post_id\": \"draft_\" + Date.now(),\n  \"asset\": {\n    \"public_id\": $('Smart Asset Selection').item.json.public_id,\n    \"image_url\": $('Smart Asset Selection').item.json.secure_url,\n    \"width\": $('Smart Asset Selection').item.json.width,\n    \"height\": $('Smart Asset Selection').item.json.height,\n    \"tags\": $('Smart Asset Selection').item.json.tags || []\n  },\n  \"proposed_caption\": $('Generate Enhanced Caption').item.json.message.content,\n  \"business_account_id\": $credentials.instagram_business_account_id,\n  \"hashtags\": JSON.parse($('Generate Enhanced Caption').item.json.message.content).hashtags || [],\n  \"hashtag_count\": JSON.parse($('Generate Enhanced Caption').item.json.message.content).hashtags?.length || 0,\n  \"caption_length\": $('Generate Enhanced Caption').item.json.message.content.length,\n  \"engagement_prediction\": JSON.parse($('Generate Enhanced Caption').item.json.message.content).engagement_prediction || 0.04,\n  \"post_type\": \"product\",\n  \"scheduled_time\": new Date().toISOString()\n}) }}",
+        "options": {
+          "timeout": 15000,
+          "retry": {
+            "enabled": true,
+            "maxAttempts": 2,
+            "waitBetweenAttempts": 1000
+          }
+        }
+      },
+      "id": "agent-approval-post",
+      "name": "Agent Approval - Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1350, 375]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('Agent Approval - Post').item.json.approved }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-post-approval",
+      "name": "Check Post Approval",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1550, 375]
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "values": {
+          "string": [
+            {
+              "name": "final_caption",
+              "value": "={{ $('Agent Approval - Post').item.json.modifications?.caption || $('Generate Enhanced Caption').item.json.message.content }}"
+            },
+            {
+              "name": "final_hashtags",
+              "value": "={{ JSON.stringify($('Agent Approval - Post').item.json.modifications?.hashtags || JSON.parse($('Generate Enhanced Caption').item.json.message.content).hashtags) }}"
+            }
+          ]
+        }
+      },
+      "id": "apply-agent-modifications",
+      "name": "Apply Agent Modifications",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1750, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse and enhance AI-generated caption\nconst response = $input.item.json.message?.content || $('Agent Approval - Post').item.json.modifications?.caption;\nconst parsed = typeof response === 'string' ? JSON.parse(response) : response;\nconst assetData = $('Smart Asset Selection').item.json;\n\n// Build final Instagram caption\nconst finalCaption = `${parsed.hook}\n\n${parsed.body}\n\n${parsed.cta}\n\n${parsed.hashtags.join(' ')}`;\n\n// Validate caption length (Instagram limit: 2200 characters)\nif (finalCaption.length > 2200) {\n  console.warn(`Caption too long (${finalCaption.length} chars), truncating...`);\n  const truncated = finalCaption.substring(0, 2150);\n  const lastSpace = truncated.lastIndexOf(' ');\n  return [{\n    json: {\n      ...parsed,\n      final_caption: truncated.substring(0, lastSpace) + '... ✨',\n      truncated: true,\n      original_length: finalCaption.length\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    hook: parsed.hook,\n    body: parsed.body,\n    cta: parsed.cta,\n    hashtags: parsed.hashtags,\n    final_caption: finalCaption,\n    engagement_prediction: parsed.engagement_prediction || 0.035,\n    caption_length: finalCaption.length,\n    hashtag_count: parsed.hashtags.length,\n    truncated: false\n  }\n}];"
       },
       "id": "parse-caption",
       "name": "Parse & Validate Caption",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1350, 375]
+      "position": [1950, 300]
+    },
+    {
+      "parameters": {
+        "operation": "log",
+        "message": "Post rejected by agent: {{ $('Agent Approval - Post').item.json.decision_reasoning }}"
+      },
+      "id": "skip-publish",
+      "name": "Skip Publish",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1750, 450]
+    },
+    {
+      "parameters": {
+        "channel": "#instagram-automation",
+        "text": "🚫 Agent rejected scheduled post\nReason: {{ $('Agent Approval - Post').item.json.decision_reasoning }}\nAsset: {{ $('Smart Asset Selection').item.json.title }}\nQuality Score: {{ $('Agent Approval - Post').item.json.quality_score }}/10",
+        "otherOptions": {}
+      },
+      "id": "slack-post-rejection",
+      "name": "Notify Slack - Post Rejection",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1950, 450],
+      "credentials": {
+        "slackApi": {
+          "id": "slack_api",
+          "name": "Slack API"
+        }
+      }
     },
     {
       "parameters": {
@@ -508,7 +612,58 @@
       "main": [
         [
           {
+            "node": "Agent Approval - Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent Approval - Post": {
+      "main": [
+        [
+          {
+            "node": "Check Post Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Post Approval": {
+      "main": [
+        [
+          {
+            "node": "Apply Agent Modifications",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip Publish",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Agent Modifications": {
+      "main": [
+        [
+          {
             "node": "Parse & Validate Caption",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Publish": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack - Post Rejection",
             "type": "main",
             "index": 0
           }

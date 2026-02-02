@@ -268,7 +268,60 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://graph.facebook.com/v18.0/{{ $json.id }}/replies",
+        "url": "http://langchain-agent:3002/approve/comment-reply",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.AGENT_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "jsonBody": "={{ JSON.stringify({\n  \"comment_id\": $('Split Comments').item.json.id,\n  \"comment_text\": $('Split Comments').item.json.text,\n  \"commenter_username\": $('Split Comments').item.json.from?.username || \"unknown\",\n  \"post_id\": $('Get Posts').item.json.id,\n  \"business_account_id\": $credentials.instagram_business_account_id,\n  \"proposed_reply\": $('Generate Response').item.json.message.content,\n  \"detected_intent\": $('Analyze Comment').item.json.detected_intent || \"general\",\n  \"sentiment\": $('Analyze Comment').item.json.sentiment || \"neutral\",\n  \"confidence\": $('Analyze Comment').item.json.confidence || 0.5\n}) }}",
+        "options": {
+          "timeout": 15000,
+          "retry": {
+            "enabled": true,
+            "maxAttempts": 2,
+            "waitBetweenAttempts": 1000
+          }
+        }
+      },
+      "id": "agent-approval-comment",
+      "name": "Agent Approval - Comment Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2050, 250]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('Agent Approval - Comment Reply').item.json.approved }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-reply-approval",
+      "name": "Check Reply Approval",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2250, 250]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v18.0/{{ $('Analyze Comment').item.json.id }}/replies",
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "facebookGraphApi",
         "sendBody": true,
@@ -276,7 +329,7 @@
           "parameters": [
             {
               "name": "message",
-              "value": "={{ $json.message.content }}"
+              "value": "={{ $('Agent Approval - Comment Reply').item.json.modifications?.reply_text || $('Generate Response').item.json.message.content }}"
             },
             {
               "name": "access_token",
@@ -290,13 +343,24 @@
       "name": "Post Reply",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.1,
-      "position": [2050, 250],
+      "position": [2450, 200],
       "credentials": {
         "facebookGraphApi": {
           "id": "5",
           "name": "Facebook Graph API"
         }
       }
+    },
+    {
+      "parameters": {
+        "operation": "log",
+        "message": "Agent rejected reply: {{ $('Agent Approval - Comment Reply').item.json.decision_reasoning }}"
+      },
+      "id": "skip-reply",
+      "name": "Skip Reply",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2450, 300]
     },
     {
       "parameters": {
@@ -553,7 +617,36 @@
       "main": [
         [
           {
+            "node": "Agent Approval - Comment Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent Approval - Comment Reply": {
+      "main": [
+        [
+          {
+            "node": "Check Reply Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Reply Approval": {
+      "main": [
+        [
+          {
             "node": "Post Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip Reply",
             "type": "main",
             "index": 0
           }
@@ -561,6 +654,17 @@
       ]
     },
     "Post Reply": {
+      "main": [
+        [
+          {
+            "node": "Mark as Responded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Reply": {
       "main": [
         [
           {

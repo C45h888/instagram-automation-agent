@@ -333,6 +333,62 @@
     },
     {
       "parameters": {
+        "method": "POST",
+        "url": "http://langchain-agent:3002/approve/dm-reply",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.AGENT_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": []
+        },
+        "jsonBody": "={{ JSON.stringify({\n  \"message_id\": $('Merge Message Sources').item.json.id,\n  \"dm_text\": $('Merge Message Sources').item.json.text || $('Merge Message Sources').item.json.message,\n  \"sender_username\": $('Merge Message Sources').item.json.from?.username || \"unknown\",\n  \"sender_id\": $('Merge Message Sources').item.json.from?.id || \"unknown\",\n  \"business_account_id\": $credentials.instagram_business_account_id,\n  \"proposed_reply\": $('Personalize Response').item.json.message.content,\n  \"detected_intent\": $('Classify Messages').item.json.category,\n  \"sentiment\": $('Classify Messages').item.json.sentiment || \"neutral\",\n  \"within_24h_window\": true,\n  \"priority\": $('Route by Priority').item.json.priority || \"medium\",\n  \"customer_history\": {\n    \"previous_interactions\": 0,\n    \"sentiment_history\": \"neutral\",\n    \"lifetime_value\": 0\n  }\n}) }}",
+        "options": {
+          "timeout": 15000,
+          "retry": {
+            "enabled": true,
+            "maxAttempts": 2,
+            "waitBetweenAttempts": 1000
+          }
+        }
+      },
+      "id": "agent-approval-dm",
+      "name": "Agent Approval - Customer Service",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1500, 550]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $('Agent Approval - Customer Service').item.json.approved }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-agent-decision",
+      "name": "Check Agent Decision",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1700, 550]
+    },
+    {
+      "parameters": {
         "conditions": {
           "options": {
             "caseSensitive": true,
@@ -357,7 +413,36 @@
       "name": "Is DM?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [1500, 550]
+      "position": [1900, 450]
+    },
+    {
+      "parameters": {
+        "operation": "log",
+        "message": "Agent rejected: {{ $('Agent Approval - Customer Service').item.json.decision_reasoning }}"
+      },
+      "id": "log-rejection",
+      "name": "Log Agent Rejection",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1900, 650]
+    },
+    {
+      "parameters": {
+        "channel": "#instagram-automation",
+        "text": "🚫 Agent rejected customer service response\nReason: {{ $('Agent Approval - Customer Service').item.json.decision_reasoning }}\nOriginal: {{ $('Personalize Response').item.json.message.content }}",
+        "otherOptions": {}
+      },
+      "id": "slack-rejection",
+      "name": "Notify Slack - Rejection",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [2100, 650],
+      "credentials": {
+        "slackApi": {
+          "id": "2",
+          "name": "Slack API"
+        }
+      }
     },
     {
       "parameters": {
@@ -661,7 +746,47 @@
       "main": [
         [
           {
+            "node": "Agent Approval - Customer Service",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent Approval - Customer Service": {
+      "main": [
+        [
+          {
+            "node": "Check Agent Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Agent Decision": {
+      "main": [
+        [
+          {
             "node": "Is DM?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Agent Rejection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Agent Rejection": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack - Rejection",
             "type": "main",
             "index": 0
           }
