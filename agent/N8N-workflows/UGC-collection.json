@@ -1,0 +1,587 @@
+{
+  "name": "Instagram UGC Collection",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "schedule-1",
+      "name": "Hourly UGC Check",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 400]
+    },
+    {
+      "parameters": {
+        "content": "## UGC Collection & Management\n\nThis workflow handles:\n1. Monitoring brand hashtags\n2. Detecting product mentions in posts\n3. Identifying high-quality UGC\n4. Tracking usage rights\n5. Automating repost requests\n6. Managing influencer content\n\nKey Hashtags Monitored:\n- #YourBrandName\n- #YourBrandStyle\n- #YourBrandCommunity\n- Product-specific tags",
+        "height": 200,
+        "width": 350
+      },
+      "id": "sticky-1",
+      "name": "Workflow Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [100, 50]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "read",
+        "sheetId": "YOUR_HASHTAG_CONFIG_SHEET",
+        "range": "Hashtags!A:B",
+        "options": {
+          "returnAllMatches": true
+        }
+      },
+      "id": "sheets-hashtags",
+      "name": "Get Monitored Hashtags",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [450, 400],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "1",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "=",
+        "options": {}
+      },
+      "id": "split-hashtags",
+      "name": "Split Hashtags",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.facebook.com/v18.0/ig_hashtag_search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "user_id",
+              "value": "={{ $credentials.instagram_business_account_id }}"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.hashtag.replace('#', '') }}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-hashtag-id",
+      "name": "Get Hashtag ID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 400],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "5",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.facebook.com/v18.0/{{ $json.data[0].id }}/recent_media",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "user_id",
+              "value": "={{ $credentials.instagram_business_account_id }}"
+            },
+            {
+              "name": "fields",
+              "value": "id,caption,media_type,media_url,permalink,username,timestamp,like_count,comments_count"
+            },
+            {
+              "name": "limit",
+              "value": "30"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-recent-posts",
+      "name": "Get Recent Posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "merge",
+        "options": {}
+      },
+      "id": "merge-posts",
+      "name": "Merge All Posts",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1250, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter and score UGC for quality and relevance\nconst posts = $input.all();\nconst processedPosts = [];\nconst seenIds = new Set();\n\n// Get existing UGC from static data to avoid duplicates\nconst existingUGC = $getWorkflowStaticData('processed_ugc') || [];\n\nposts.forEach(item => {\n  if (item.json.data) {\n    item.json.data.forEach(post => {\n      // Skip if already processed\n      if (seenIds.has(post.id) || existingUGC.includes(post.id)) {\n        return;\n      }\n      \n      seenIds.add(post.id);\n      \n      // Calculate quality score\n      let qualityScore = 0;\n      \n      // Engagement score (likes + comments)\n      const engagement = (post.like_count || 0) + (post.comments_count || 0) * 2;\n      if (engagement > 100) qualityScore += 30;\n      else if (engagement > 50) qualityScore += 20;\n      else if (engagement > 20) qualityScore += 10;\n      \n      // Media type score\n      if (post.media_type === 'IMAGE') qualityScore += 20;\n      else if (post.media_type === 'CAROUSEL_ALBUM') qualityScore += 25;\n      else if (post.media_type === 'VIDEO') qualityScore += 15;\n      \n      // Caption quality\n      const caption = post.caption || '';\n      if (caption.length > 100) qualityScore += 10;\n      if (caption.includes('@yourbrand')) qualityScore += 15;\n      \n      // Check for product mentions\n      const productKeywords = ['wearing', 'styled', 'love my', 'obsessed with', 'favorite'];\n      const hasProductMention = productKeywords.some(keyword => \n        caption.toLowerCase().includes(keyword)\n      );\n      if (hasProductMention) qualityScore += 15;\n      \n      // Only include posts with quality score > 40\n      if (qualityScore > 40) {\n        processedPosts.push({\n          post_id: post.id,\n          username: post.username,\n          caption: caption,\n          media_url: post.media_url,\n          media_type: post.media_type,\n          permalink: post.permalink,\n          timestamp: post.timestamp,\n          engagement: engagement,\n          quality_score: qualityScore,\n          has_product_mention: hasProductMention,\n          needs_rights_clearance: true,\n          detected_hashtag: $('Split Hashtags').item.json.hashtag\n        });\n      }\n    });\n  }\n});\n\n// Sort by quality score\nprocessedPosts.sort((a, b) => b.quality_score - a.quality_score);\n\n// Update static data with processed IDs\nconst updatedProcessedIds = [...existingUGC, ...processedPosts.map(p => p.post_id)];\n// Keep only last 1000 IDs\nif (updatedProcessedIds.length > 1000) {\n  updatedProcessedIds.splice(0, updatedProcessedIds.length - 1000);\n}\n$setWorkflowStaticData('processed_ugc', updatedProcessedIds);\n\n// Return top 10 posts\nreturn processedPosts.slice(0, 10).map(post => ({ json: post }));"
+      },
+      "id": "code-filter",
+      "name": "Filter & Score UGC",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.quality_score }}",
+              "rightValue": 70,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-high-quality",
+      "name": "High Quality UGC?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1650, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.instagram.com/oembed",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{ $json.permalink }}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-embed",
+      "name": "Get Embed Code",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "dm_message",
+              "value": "Hi {{ $json.username }}! 👋 We absolutely love your recent post featuring our products! Would you be open to us reposting it on our page? We'd love to share your amazing style with our community (with full credit to you, of course!). Let us know! 💕"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-message",
+      "name": "Prepare DM Message",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "append",
+        "sheetId": "YOUR_UGC_TRACKER_SHEET",
+        "range": "UGC_Content!A:L",
+        "options": {
+          "valueInputOption": "USER_ENTERED"
+        },
+        "values": [
+          [
+            "={{ $now.toISO() }}",
+            "={{ $json.username }}",
+            "={{ $json.post_id }}",
+            "={{ $json.permalink }}",
+            "={{ $json.caption }}",
+            "={{ $json.media_type }}",
+            "={{ $json.engagement }}",
+            "={{ $json.quality_score }}",
+            "={{ $json.detected_hashtag }}",
+            "pending",
+            "={{ $('Get Embed Code').item.json.html }}",
+            "=IMAGE(\"{{ $json.media_url }}\")"
+          ]
+        ]
+      },
+      "id": "sheets-save-ugc",
+      "name": "Save to UGC Tracker",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2250, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "1",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#ugc-alerts",
+        "text": "🌟 New High-Quality UGC Detected!",
+        "attachments": [
+          {
+            "color": "#00FF00",
+            "fields": {
+              "values": [
+                {
+                  "title": "Creator",
+                  "value": "@{{ $json.username }}",
+                  "short": true
+                },
+                {
+                  "title": "Quality Score",
+                  "value": "{{ $json.quality_score }}/100",
+                  "short": true
+                },
+                {
+                  "title": "Engagement",
+                  "value": "{{ $json.engagement }} interactions",
+                  "short": true
+                },
+                {
+                  "title": "Hashtag",
+                  "value": "{{ $json.detected_hashtag }}",
+                  "short": true
+                }
+              ]
+            },
+            "image_url": "{{ $json.media_url }}",
+            "footer": "{{ $json.caption.substring(0, 200) }}...",
+            "actions": [
+              {
+                "type": "button",
+                "text": "View Post",
+                "url": "{{ $json.permalink }}"
+              },
+              {
+                "type": "button",
+                "text": "Send DM Request",
+                "url": "https://www.instagram.com/direct/t/{{ $json.username }}"
+              }
+            ]
+          }
+        ],
+        "otherOptions": {}
+      },
+      "id": "slack-alert",
+      "name": "Alert Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [2450, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "2",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Rights Management\n\nFor each high-quality UGC:\n1. Send DM requesting repost permission\n2. Track permission status in spreadsheet\n3. Only repost after explicit consent\n4. Maintain record of permissions\n\nLegal Compliance:\n- Always credit original creator\n- Never use without permission\n- Archive permission screenshots",
+        "height": 180,
+        "width": 300
+      },
+      "id": "sticky-2",
+      "name": "Rights Management",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [2050, 100]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "append",
+        "sheetId": "YOUR_UGC_TRACKER_SHEET",
+        "range": "Moderate_UGC!A:J",
+        "options": {
+          "valueInputOption": "USER_ENTERED"
+        },
+        "values": [
+          [
+            "={{ $now.toISO() }}",
+            "={{ $json.username }}",
+            "={{ $json.post_id }}",
+            "={{ $json.permalink }}",
+            "={{ $json.caption.substring(0, 500) }}",
+            "={{ $json.quality_score }}",
+            "={{ $json.engagement }}",
+            "={{ $json.detected_hashtag }}",
+            "review_needed",
+            "=HYPERLINK(\"{{ $json.permalink }}\", \"View Post\")"
+          ]
+        ]
+      },
+      "id": "sheets-moderate",
+      "name": "Save for Review",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1850, 500],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "1",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.facebook.com/v18.0/{{ $credentials.instagram_business_account_id }}/tags",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,caption,media_type,media_url,permalink,username,timestamp"
+            },
+            {
+              "name": "limit",
+              "value": "25"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-tags",
+      "name": "Get Tagged Posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 600],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "5",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Influencer Detection\n\nThe workflow also:\n1. Identifies accounts with 10k+ followers\n2. Tracks influencer mentions\n3. Prioritizes influencer UGC\n4. Manages influencer relationships\n5. Tracks collaboration history",
+        "height": 140,
+        "width": 250
+      },
+      "id": "sticky-3",
+      "name": "Influencer Features",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [450, 750]
+    }
+  ],
+  "connections": {
+    "Hourly UGC Check": {
+      "main": [
+        [
+          {
+            "node": "Get Monitored Hashtags",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Tagged Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Monitored Hashtags": {
+      "main": [
+        [
+          {
+            "node": "Split Hashtags",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Hashtags": {
+      "main": [
+        [
+          {
+            "node": "Get Hashtag ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Hashtag ID": {
+      "main": [
+        [
+          {
+            "node": "Get Recent Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Recent Posts": {
+      "main": [
+        [
+          {
+            "node": "Merge All Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Tagged Posts": {
+      "main": [
+        [
+          {
+            "node": "Merge All Posts",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge All Posts": {
+      "main": [
+        [
+          {
+            "node": "Filter & Score UGC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Score UGC": {
+      "main": [
+        [
+          {
+            "node": "High Quality UGC?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "High Quality UGC?": {
+      "main": [
+        [
+          {
+            "node": "Get Embed Code",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Save for Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Embed Code": {
+      "main": [
+        [
+          {
+            "node": "Prepare DM Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare DM Message": {
+      "main": [
+        [
+          {
+            "node": "Save to UGC Tracker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to UGC Tracker": {
+      "main": [
+        [
+          {
+            "node": "Alert Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "789abcde-f012-3456-789a-bcdef0123456",
+  "meta": {
+    "templateId": "instagram-ugc-collection"
+  },
+  "id": "workflow-ugc-001",
+  "tags": []
+}

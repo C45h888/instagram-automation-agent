@@ -1,0 +1,596 @@
+{
+  "name": "Instagram Engagement Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "schedule-1",
+      "name": "Check Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 400]
+    },
+    {
+      "parameters": {
+        "content": "## Engagement Monitoring Workflow\n\nThis workflow monitors and responds to:\n1. Comments on posts\n2. Direct Messages (DMs)\n3. Brand mentions and hashtags\n4. User-generated content\n\nResponse Types:\n- Automated responses for common queries\n- Human escalation for complex issues\n- Sentiment analysis for priority routing\n- UGC detection and rights management",
+        "height": 200,
+        "width": 350
+      },
+      "id": "sticky-1",
+      "name": "Workflow Documentation",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [100, 50]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.facebook.com/v18.0/{{ $credentials.instagram_business_account_id }}/media",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,caption,comments_count,timestamp"
+            },
+            {
+              "name": "limit",
+              "value": "10"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-1",
+      "name": "Get Recent Posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 400],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "5",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "id": "split-1",
+      "name": "Split Posts",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [650, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.facebook.com/v18.0/{{ $json.id }}/comments",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,text,from,timestamp,replies"
+            },
+            {
+              "name": "limit",
+              "value": "50"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-2",
+      "name": "Get Comments",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.data?.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-1",
+      "name": "Has Comments?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1050, 400]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "id": "split-2",
+      "name": "Split Comments",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [1250, 350]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Check if comment has already been responded to\nconst commentId = $input.item.json.id;\nconst existingResponses = await $getWorkflowStaticData('responded_comments') || [];\n\nif (existingResponses.includes(commentId)) {\n  return [];\n}\n\n// Analyze comment for intent\nconst comment = $input.item.json.text.toLowerCase();\nconst intents = {\n  sizing: ['size', 'fit', 'measurement', 'small', 'medium', 'large', 'xl'],\n  shipping: ['ship', 'delivery', 'arrive', 'send', 'track'],\n  price: ['price', 'cost', 'expensive', 'cheap', 'discount', 'sale'],\n  availability: ['stock', 'available', 'sold out', 'when', 'restock'],\n  complaint: ['bad', 'terrible', 'worst', 'hate', 'problem', 'issue'],\n  praise: ['love', 'amazing', 'great', 'beautiful', 'perfect', 'awesome']\n};\n\nlet detectedIntent = 'general';\nlet sentiment = 'neutral';\n\nfor (const [intent, keywords] of Object.entries(intents)) {\n  if (keywords.some(keyword => comment.includes(keyword))) {\n    detectedIntent = intent;\n    if (intent === 'complaint') sentiment = 'negative';\n    if (intent === 'praise') sentiment = 'positive';\n    break;\n  }\n}\n\nreturn [{\n  json: {\n    ...($input.item.json),\n    detected_intent: detectedIntent,\n    sentiment: sentiment,\n    needs_human: sentiment === 'negative' || comment.length > 200\n  }\n}];"
+      },
+      "id": "code-1",
+      "name": "Analyze Comment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 350]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.needs_human }}",
+              "rightValue": "={{ true }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-2",
+      "name": "Needs Human?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1650, 350]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a friendly customer service representative for a niche clothing brand. Respond to Instagram comments professionally and engagingly. Keep responses under 150 characters. Use appropriate emojis. Be helpful but don't make specific promises about inventory or pricing."
+            },
+            {
+              "role": "user",
+              "content": "Intent: {{ $json.detected_intent }}\nComment: {{ $json.text }}\n\nGenerate an appropriate response."
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 100
+        }
+      },
+      "id": "openai-1",
+      "name": "Generate Response",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.2,
+      "position": [1850, 250],
+      "credentials": {
+        "openAiApi": {
+          "id": "4",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#customer-service",
+        "text": ":warning: Human Review Needed for Instagram Comment",
+        "attachments": [
+          {
+            "color": "#FF0000",
+            "fields": {
+              "values": [
+                {
+                  "title": "Comment From",
+                  "value": "{{ $json.from.username }}",
+                  "short": true
+                },
+                {
+                  "title": "Sentiment",
+                  "value": "{{ $json.sentiment }}",
+                  "short": true
+                },
+                {
+                  "title": "Comment Text",
+                  "value": "{{ $json.text }}",
+                  "short": false
+                },
+                {
+                  "title": "Post Link",
+                  "value": "<https://www.instagram.com/p/{{ $('Split Posts').item.json.id }}|View Post>",
+                  "short": false
+                }
+              ]
+            }
+          }
+        ],
+        "otherOptions": {}
+      },
+      "id": "slack-1",
+      "name": "Alert Human Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1850, 450],
+      "credentials": {
+        "slackApi": {
+          "id": "2",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v18.0/{{ $json.id }}/replies",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "message",
+              "value": "={{ $json.message.content }}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-3",
+      "name": "Post Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2050, 250],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "5",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Save responded comment ID to prevent duplicates\nconst commentId = $('Analyze Comment').item.json.id;\nconst existingResponses = $getWorkflowStaticData('responded_comments') || [];\n\nexistingResponses.push(commentId);\n\n// Keep only last 1000 comment IDs\nif (existingResponses.length > 1000) {\n  existingResponses.shift();\n}\n\n$setWorkflowStaticData('responded_comments', existingResponses);\n\nreturn $input.all();"
+      },
+      "id": "code-2",
+      "name": "Mark as Responded",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2250, 250]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "append",
+        "sheetId": "YOUR_ENGAGEMENT_LOG_ID",
+        "range": "Comment_Responses!A:H",
+        "options": {
+          "valueInputOption": "USER_ENTERED"
+        },
+        "values": [
+          [
+            "={{ $now.toISO() }}",
+            "={{ $('Analyze Comment').item.json.from.username }}",
+            "={{ $('Analyze Comment').item.json.text }}",
+            "={{ $('Analyze Comment').item.json.detected_intent }}",
+            "={{ $('Analyze Comment').item.json.sentiment }}",
+            "={{ $('Generate Response').item.json.message.content }}",
+            "=HYPERLINK(\"https://www.instagram.com/p/{{ $('Split Posts').item.json.id }}\", \"View Post\")",
+            "automated"
+          ]
+        ]
+      },
+      "id": "sheets-1",
+      "name": "Log Response",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2450, 250],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "1",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Parallel Processing\n\nThis workflow also monitors:\n1. Direct Messages\n2. Brand Mentions\n3. Hashtags\n\nThese run in parallel with comment monitoring for efficiency.",
+        "height": 120,
+        "width": 250
+      },
+      "id": "sticky-2",
+      "name": "Parallel Tasks",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [450, 550]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.facebook.com/v18.0/{{ $credentials.instagram_business_account_id }}/conversations",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "participants,messages{message,from,created_time}"
+            },
+            {
+              "name": "limit",
+              "value": "20"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-dms",
+      "name": "Get DMs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 700],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "5",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.facebook.com/v18.0/{{ $credentials.instagram_business_account_id }}/tagged",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,caption,media_type,media_url,username,timestamp"
+            },
+            {
+              "name": "limit",
+              "value": "25"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-mentions",
+      "name": "Get Brand Mentions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 850],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "5",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Response Templates\n\nCommon Intents:\n- Sizing: \"Check our size guide at [link]! DM us if you need specific measurements 📏\"\n- Shipping: \"We ship worldwide! Orders typically arrive in 5-7 days 📦✨\"\n- Price: \"Prices vary by style! Check our website for current offers 💕\"\n- Stock: \"Let me check availability for you! What size/color are you looking for?\"\n- Praise: \"Thank you so much! We'd love to see you styling it 😍\"",
+        "height": 180,
+        "width": 400
+      },
+      "id": "sticky-3",
+      "name": "Response Templates",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1800, 50]
+    }
+  ],
+  "connections": {
+    "Check Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Get Recent Posts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get DMs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Brand Mentions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Recent Posts": {
+      "main": [
+        [
+          {
+            "node": "Split Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Posts": {
+      "main": [
+        [
+          {
+            "node": "Get Comments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Comments": {
+      "main": [
+        [
+          {
+            "node": "Has Comments?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Comments?": {
+      "main": [
+        [
+          {
+            "node": "Split Comments",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Split Comments": {
+      "main": [
+        [
+          {
+            "node": "Analyze Comment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Comment": {
+      "main": [
+        [
+          {
+            "node": "Needs Human?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Human?": {
+      "main": [
+        [
+          {
+            "node": "Generate Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert Human Team",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Response": {
+      "main": [
+        [
+          {
+            "node": "Post Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Reply": {
+      "main": [
+        [
+          {
+            "node": "Mark as Responded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark as Responded": {
+      "main": [
+        [
+          {
+            "node": "Log Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "cdef0123-4567-89ab-cdef-0123456789ab",
+  "meta": {
+    "templateId": "instagram-engagement-monitor"
+  },
+  "id": "workflow-engagement-001",
+  "tags": []
+}

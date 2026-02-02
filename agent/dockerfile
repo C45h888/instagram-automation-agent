@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+# Install system dependencies (curl for healthcheck)
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements and install Python deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy entire agent project
+COPY . .
+
+EXPOSE 3002
+
+# Run with gunicorn + gevent for async concurrency (4 workers for 8 vCPU)
+CMD ["gunicorn", "-k", "gevent", "-w", "4", "-b", "0.0.0.0:3002", "--timeout", "30", "agent:app"]

@@ -1,0 +1,168 @@
+version: '3.9'
+
+services:
+  # ================================
+  # Backend API Service (Express)
+  # ================================
+  backend:
+    container_name: instagram-backend
+    build:
+      context: ./backend.api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env.production
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    volumes:
+      - ./backend.api/logs:/app/logs
+    networks:
+      - instagram-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # ================================
+  # Frontend Service (Nginx + React)
+  # ================================
+  frontend:
+    container_name: instagram-frontend
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - VITE_AUTH_MODE
+        - VITE_META_APP_ID
+        - VITE_META_APP_SECRET
+        - VITE_OAUTH_REDIRECT_URI
+        - VITE_SUPABASE_URL
+        - VITE_SUPABASE_ANON_KEY
+        - VITE_API_BASE_URL
+        - VITE_API_URL
+        - VITE_WEBHOOK_URL
+        - VITE_WEBHOOK_VERIFY_TOKEN
+        - VITE_SHOW_ADMIN_LINK
+        - VITE_INSTAGRAM_APP_ID
+        - N8N_BASE_URL
+        - N8N_DM_WEBHOOK
+        - N8N_COMMENT_WEBHOOK
+        - N8N_ORDER_WEBHOOK
+    env_file:
+      - .env.production
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - instagram-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # ================================
+  # Ollama AI Model Server
+  # ================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - instagram-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 6G
+
+  # ================================
+  # LangChain Oversight Brain Agent
+  # ================================
+  langchain-agent:
+    container_name: langchain-agent
+    build:
+      context: ./agent
+      dockerfile: dockerfile
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    env_file:
+      - .env.production
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - FLASK_PORT=3002
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - instagram-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+# ================================
+# Networks
+# ================================
+networks:
+  instagram-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# ================================
+# Volumes
+# ================================
+volumes:
+  backend-logs:
+    driver: local
+  ollama-data:
+    driver: local

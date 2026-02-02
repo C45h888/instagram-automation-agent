@@ -1,0 +1,522 @@
+{
+  "name": "Instagram Analytics Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 23 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-daily",
+      "name": "Daily Report Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 23 * * 0"
+            }
+          ]
+        }
+      },
+      "id": "schedule-weekly",
+      "name": "Weekly Report Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 450]
+    },
+    {
+      "parameters": {
+        "content": "## Analytics Pipeline\n\nThis workflow collects and analyzes:\n1. Instagram Insights (reach, impressions, engagement)\n2. Google Analytics (traffic from Instagram)\n3. Sales data (conversions from Instagram)\n4. Content performance metrics\n5. Hashtag effectiveness\n6. Competitor benchmarking\n\nReports Generated:\n- Daily performance summary\n- Weekly comprehensive report\n- Monthly trend analysis",
+        "height": 220,
+        "width": 350
+      },
+      "id": "sticky-1",
+      "name": "Workflow Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [100, 50]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "multiplex",
+        "options": {}
+      },
+      "id": "merge-1",
+      "name": "Merge Triggers",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [450, 375]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "report_type",
+              "value": "={{ $('Daily Report Trigger').context ? 'daily' : 'weekly' }}"
+            },
+            {
+              "name": "report_date",
+              "value": "={{ $now.format('YYYY-MM-DD') }}"
+            },
+            {
+              "name": "start_date",
+              "value": "={{ $('Daily Report Trigger').context ? $now.minus(1, 'day').format('YYYY-MM-DD') : $now.minus(7, 'days').format('YYYY-MM-DD') }}"
+            },
+            {
+              "name": "end_date",
+              "value": "={{ $now.format('YYYY-MM-DD') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-dates",
+      "name": "Set Date Range",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [650, 375]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.facebook.com/v18.0/{{ $credentials.instagram_business_account_id }}/insights",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "metric",
+              "value": "impressions,reach,profile_views,website_clicks,email_contacts"
+            },
+            {
+              "name": "period",
+              "value": "day"
+            },
+            {
+              "name": "since",
+              "value": "={{ $json.start_date }}"
+            },
+            {
+              "name": "until",
+              "value": "={{ $json.end_date }}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-insights",
+      "name": "Get Instagram Insights",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "5",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://graph.facebook.com/v18.0/{{ $credentials.instagram_business_account_id }}/media",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "facebookGraphApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "fields",
+              "value": "id,caption,media_type,like_count,comments_count,timestamp,insights.metric(engagement,impressions,reach,saved)"
+            },
+            {
+              "name": "since",
+              "value": "={{ Date.parse($json.start_date) / 1000 }}"
+            },
+            {
+              "name": "until",
+              "value": "={{ Date.parse($json.end_date) / 1000 }}"
+            },
+            {
+              "name": "access_token",
+              "value": "={{ $credentials.accessToken }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-posts",
+      "name": "Get Post Metrics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 450],
+      "credentials": {
+        "facebookGraphApi": {
+          "id": "5",
+          "name": "Facebook Graph API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "method": "POST",
+        "url": "https://analyticsreporting.googleapis.com/v4/reports:batchGet",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"reportRequests\": [\n    {\n      \"viewId\": \"YOUR_GA_VIEW_ID\",\n      \"dateRanges\": [\n        {\n          \"startDate\": \"{{ $('Set Date Range').item.json.start_date }}\",\n          \"endDate\": \"{{ $('Set Date Range').item.json.end_date }}\"\n        }\n      ],\n      \"metrics\": [\n        {\"expression\": \"ga:sessions\"},\n        {\"expression\": \"ga:users\"},\n        {\"expression\": \"ga:pageviews\"},\n        {\"expression\": \"ga:transactions\"},\n        {\"expression\": \"ga:transactionRevenue\"}\n      ],\n      \"dimensions\": [\n        {\"name\": \"ga:sourceMedium\"},\n        {\"name\": \"ga:campaign\"}\n      ],\n      \"dimensionFilterClauses\": [\n        {\n          \"filters\": [\n            {\n              \"dimensionName\": \"ga:sourceMedium\",\n              \"operator\": \"REGEXP\",\n              \"expressions\": [\"instagram\"]\n            }\n          ]\n        }\n      ]\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "google-analytics",
+      "name": "Get GA Instagram Traffic",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 600],
+      "credentials": {
+        "googleApi": {
+          "id": "6",
+          "name": "Google Service Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process and aggregate all analytics data\nconst insights = $('Get Instagram Insights').item.json;\nconst posts = $('Get Post Metrics').item.json;\nconst gaData = $('Get GA Instagram Traffic').item.json;\nconst dateRange = $('Set Date Range').item.json;\n\n// Process Instagram Insights\nlet totalReach = 0;\nlet totalImpressions = 0;\nlet totalProfileViews = 0;\nlet totalWebsiteClicks = 0;\n\nif (insights.data) {\n  insights.data.forEach(metric => {\n    metric.values.forEach(value => {\n      switch(metric.name) {\n        case 'reach': totalReach += value.value; break;\n        case 'impressions': totalImpressions += value.value; break;\n        case 'profile_views': totalProfileViews += value.value; break;\n        case 'website_clicks': totalWebsiteClicks += value.value; break;\n      }\n    });\n  });\n}\n\n// Process Post Metrics\nlet totalPosts = 0;\nlet totalLikes = 0;\nlet totalComments = 0;\nlet avgEngagementRate = 0;\n\nif (posts.data) {\n  totalPosts = posts.data.length;\n  posts.data.forEach(post => {\n    totalLikes += post.like_count || 0;\n    totalComments += post.comments_count || 0;\n  });\n  \n  if (totalReach > 0) {\n    avgEngagementRate = ((totalLikes + totalComments) / totalReach * 100).toFixed(2);\n  }\n}\n\n// Process GA Data\nlet instagramSessions = 0;\nlet instagramRevenue = 0;\nlet instagramTransactions = 0;\n\nif (gaData.reports && gaData.reports[0].data.rows) {\n  gaData.reports[0].data.rows.forEach(row => {\n    instagramSessions += parseInt(row.metrics[0].values[0]);\n    instagramTransactions += parseInt(row.metrics[0].values[3]);\n    instagramRevenue += parseFloat(row.metrics[0].values[4]);\n  });\n}\n\n// Calculate additional metrics\nconst conversionRate = instagramSessions > 0 ? \n  (instagramTransactions / instagramSessions * 100).toFixed(2) : 0;\n\nconst avgOrderValue = instagramTransactions > 0 ? \n  (instagramRevenue / instagramTransactions).toFixed(2) : 0;\n\nreturn [{\n  json: {\n    report_type: dateRange.report_type,\n    report_date: dateRange.report_date,\n    date_range: {\n      start: dateRange.start_date,\n      end: dateRange.end_date\n    },\n    instagram_metrics: {\n      reach: totalReach,\n      impressions: totalImpressions,\n      profile_views: totalProfileViews,\n      website_clicks: totalWebsiteClicks,\n      posts_published: totalPosts,\n      total_likes: totalLikes,\n      total_comments: totalComments,\n      avg_engagement_rate: avgEngagementRate + '%'\n    },\n    website_metrics: {\n      sessions_from_instagram: instagramSessions,\n      transactions: instagramTransactions,\n      revenue: '$' + instagramRevenue.toFixed(2),\n      conversion_rate: conversionRate + '%',\n      avg_order_value: '$' + avgOrderValue\n    },\n    key_insights: {\n      best_performing_content: 'To be analyzed',\n      optimal_posting_times: 'To be analyzed',\n      hashtag_performance: 'To be analyzed'\n    }\n  }\n}];"
+      },
+      "id": "code-aggregate",
+      "name": "Aggregate Analytics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 450]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "read",
+        "sheetId": "YOUR_HISTORICAL_DATA_SHEET",
+        "range": "Analytics_History!A:M",
+        "options": {
+          "returnAllMatches": true
+        }
+      },
+      "id": "sheets-history",
+      "name": "Get Historical Data",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1300, 550],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "1",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Compare with historical data and generate insights\nconst current = $('Aggregate Analytics').item.json;\nconst historical = $('Get Historical Data').all();\n\n// Calculate week-over-week or day-over-day changes\nlet previousPeriod = null;\nif (historical.length > 0) {\n  // Get the most recent comparable period\n  previousPeriod = historical[historical.length - 1].json;\n}\n\nlet insights = [];\n\n// Engagement trend\nif (previousPeriod && previousPeriod.avg_engagement_rate) {\n  const currentRate = parseFloat(current.instagram_metrics.avg_engagement_rate);\n  const previousRate = parseFloat(previousPeriod.avg_engagement_rate);\n  const change = ((currentRate - previousRate) / previousRate * 100).toFixed(1);\n  \n  insights.push({\n    metric: 'Engagement Rate',\n    trend: change > 0 ? 'up' : 'down',\n    change: Math.abs(change) + '%',\n    insight: change > 0 ? \n      'Great job! Engagement is increasing.' : \n      'Consider testing new content formats.'\n  });\n}\n\n// Revenue trend\nif (previousPeriod && previousPeriod.revenue) {\n  const currentRevenue = parseFloat(current.website_metrics.revenue.replace('$', ''));\n  const previousRevenue = parseFloat(previousPeriod.revenue.replace('$', ''));\n  const change = ((currentRevenue - previousRevenue) / previousRevenue * 100).toFixed(1);\n  \n  insights.push({\n    metric: 'Instagram Revenue',\n    trend: change > 0 ? 'up' : 'down',\n    change: Math.abs(change) + '%',\n    insight: change > 0 ? \n      'Instagram is driving more sales!' : \n      'Review your call-to-action strategy.'\n  });\n}\n\n// Best performing content analysis\nconst posts = $('Get Post Metrics').item.json.data || [];\nif (posts.length > 0) {\n  const sortedPosts = posts.sort((a, b) => \n    (b.like_count + b.comments_count) - (a.like_count + a.comments_count)\n  );\n  \n  const topPost = sortedPosts[0];\n  current.key_insights.best_performing_content = {\n    post_id: topPost.id,\n    engagement: topPost.like_count + topPost.comments_count,\n    caption_preview: topPost.caption ? topPost.caption.substring(0, 100) + '...' : 'No caption'\n  };\n}\n\nreturn [{\n  json: {\n    ...current,\n    performance_insights: insights,\n    recommendations: generateRecommendations(current, insights)\n  }\n}];\n\nfunction generateRecommendations(data, insights) {\n  const recommendations = [];\n  \n  // Engagement recommendations\n  const engRate = parseFloat(data.instagram_metrics.avg_engagement_rate);\n  if (engRate < 2) {\n    recommendations.push('⚠️ Engagement rate is below industry average. Try more interactive content like polls or questions.');\n  }\n  \n  // Posting frequency\n  if (data.instagram_metrics.posts_published < 7 && data.report_type === 'weekly') {\n    recommendations.push('📅 Increase posting frequency to at least once per day for better visibility.');\n  }\n  \n  // Website traffic\n  if (data.instagram_metrics.website_clicks < data.instagram_metrics.reach * 0.02) {\n    recommendations.push('🔗 CTR is low. Make your link in bio more prominent and use clear CTAs.');\n  }\n  \n  // Conversion optimization\n  const convRate = parseFloat(data.website_metrics.conversion_rate);\n  if (convRate < 1) {\n    recommendations.push('🛒 Work on conversion optimization. Consider Instagram Shopping features.');\n  }\n  \n  return recommendations;\n}"
+      },
+      "id": "code-insights",
+      "name": "Generate Insights",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 450]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "sheet",
+        "operation": "append",
+        "sheetId": "YOUR_HISTORICAL_DATA_SHEET",
+        "range": "Analytics_History!A:M",
+        "options": {
+          "valueInputOption": "USER_ENTERED"
+        },
+        "values": [
+          [
+            "={{ $json.report_date }}",
+            "={{ $json.report_type }}",
+            "={{ $json.instagram_metrics.reach }}",
+            "={{ $json.instagram_metrics.impressions }}",
+            "={{ $json.instagram_metrics.profile_views }}",
+            "={{ $json.instagram_metrics.website_clicks }}",
+            "={{ $json.instagram_metrics.posts_published }}",
+            "={{ $json.instagram_metrics.total_likes }}",
+            "={{ $json.instagram_metrics.total_comments }}",
+            "={{ $json.instagram_metrics.avg_engagement_rate }}",
+            "={{ $json.website_metrics.sessions_from_instagram }}",
+            "={{ $json.website_metrics.revenue }}",
+            "={{ $json.website_metrics.conversion_rate }}"
+          ]
+        ]
+      },
+      "id": "sheets-save",
+      "name": "Save to History",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1700, 350],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "1",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "=== 📊 Instagram Analytics Report ===\\n\\n**Report Type:** {{ $json.report_type }}\\n**Period:** {{ $json.date_range.start }} to {{ $json.date_range.end }}\\n\\n📱 **Instagram Performance**\\n• Reach: {{ $json.instagram_metrics.reach.toLocaleString() }}\\n• Impressions: {{ $json.instagram_metrics.impressions.toLocaleString() }}\\n• Profile Views: {{ $json.instagram_metrics.profile_views.toLocaleString() }}\\n• Website Clicks: {{ $json.instagram_metrics.website_clicks.toLocaleString() }}\\n• Engagement Rate: {{ $json.instagram_metrics.avg_engagement_rate }}\\n• Posts Published: {{ $json.instagram_metrics.posts_published }}\\n\\n💰 **Sales & Conversions**\\n• Sessions from Instagram: {{ $json.website_metrics.sessions_from_instagram.toLocaleString() }}\\n• Transactions: {{ $json.website_metrics.transactions }}\\n• Revenue: {{ $json.website_metrics.revenue }}\\n• Conversion Rate: {{ $json.website_metrics.conversion_rate }}\\n• Average Order Value: {{ $json.website_metrics.avg_order_value }}\\n\\n📈 **Key Insights**\\n{{ $json.performance_insights.map(i => `• ${i.metric}: ${i.trend === 'up' ? '↑' : '↓'} ${i.change} - ${i.insight}`).join('\\n') }}\\n\\n💡 **Recommendations**\\n{{ $json.recommendations.join('\\n') }}",
+        "height": 500,
+        "width": 450
+      },
+      "id": "html-report",
+      "name": "Format Email Report",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1,
+      "position": [1700, 550]
+    },
+    {
+      "parameters": {
+        "fromEmail": "analytics@yourstore.com",
+        "toEmail": "marketing@yourstore.com",
+        "subject": "{{ $json.report_type === 'daily' ? 'Daily' : 'Weekly' }} Instagram Analytics Report - {{ $json.report_date }}",
+        "html": "={{ $('Format Email Report').item.html }}",
+        "options": {}
+      },
+      "id": "email-report",
+      "name": "Send Email Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1900, 450],
+      "credentials": {
+        "smtp": {
+          "id": "7",
+          "name": "SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#analytics",
+        "text": "📊 *{{ $json.report_type === 'daily' ? 'Daily' : 'Weekly' }} Instagram Report*",
+        "attachments": [
+          {
+            "color": "#1BA1E2",
+            "fields": {
+              "values": [
+                {
+                  "title": "Engagement Rate",
+                  "value": "{{ $json.instagram_metrics.avg_engagement_rate }}",
+                  "short": true
+                },
+                {
+                  "title": "Revenue",
+                  "value": "{{ $json.website_metrics.revenue }}",
+                  "short": true
+                },
+                {
+                  "title": "Website Clicks",
+                  "value": "{{ $json.instagram_metrics.website_clicks.toLocaleString() }}",
+                  "short": true
+                },
+                {
+                  "title": "Conversion Rate",
+                  "value": "{{ $json.website_metrics.conversion_rate }}",
+                  "short": true
+                }
+              ]
+            }
+          }
+        ],
+        "otherOptions": {}
+      },
+      "id": "slack-report",
+      "name": "Send Slack Summary",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [2100, 450],
+      "credentials": {
+        "slackApi": {
+          "id": "2",
+          "name": "Slack API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily Report Trigger": {
+      "main": [
+        [
+          {
+            "node": "Merge Triggers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Report Trigger": {
+      "main": [
+        [
+          {
+            "node": "Merge Triggers",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Triggers": {
+      "main": [
+        [
+          {
+            "node": "Set Date Range",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Date Range": {
+      "main": [
+        [
+          {
+            "node": "Get Instagram Insights",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Post Metrics",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get GA Instagram Traffic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Instagram Insights": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Analytics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Post Metrics": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Analytics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get GA Instagram Traffic": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Analytics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Analytics": {
+      "main": [
+        [
+          {
+            "node": "Get Historical Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Historical Data": {
+      "main": [
+        [
+          {
+            "node": "Generate Insights",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Insights": {
+      "main": [
+        [
+          {
+            "node": "Save to History",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Format Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Email Report": {
+      "main": [
+        [
+          {
+            "node": "Send Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email Report": {
+      "main": [
+        [
+          {
+            "node": "Send Slack Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "3456789a-bcde-f012-3456-789abcdef012",
+  "meta": {
+    "templateId": "instagram-analytics-pipeline"
+  },
+  "id": "workflow-analytics-001",
+  "tags": []
+}
