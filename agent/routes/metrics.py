@@ -5,10 +5,11 @@ Exposes counters and histograms at GET /metrics (no auth required).
 Import counters from this module in other files to instrument them.
 """
 
-from flask import Blueprint, Response
+from fastapi import APIRouter
+from fastapi.responses import Response
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
-metrics_bp = Blueprint("metrics", __name__)
+metrics_router = APIRouter()
 
 # ================================
 # Counters
@@ -66,7 +67,7 @@ REQUEST_LATENCY = Histogram(
 )
 
 
-@metrics_bp.route("/metrics", methods=["GET"])
-def metrics():
+@metrics_router.get("/metrics")
+async def metrics():
     """Expose Prometheus metrics. No auth (in PUBLIC_PATHS)."""
-    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

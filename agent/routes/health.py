@@ -1,10 +1,10 @@
 import time
-from flask import Blueprint, jsonify
+from fastapi import APIRouter
 from config import OLLAMA_MODEL, supabase, logger
 from services.llm_service import LLMService
 from services.supabase_service import is_redis_healthy
 
-health_bp = Blueprint("health", __name__)
+health_router = APIRouter()
 
 _start_time = time.time()
 _request_count = 0
@@ -28,8 +28,8 @@ def track_request(latency_ms: int):
     _total_latency += latency_ms
 
 
-@health_bp.route("/health", methods=["GET"])
-def health():
+@health_router.get("/health")
+async def health():
     """Enhanced health check: verifies Ollama + Supabase (per-table) + Redis."""
     status = "healthy"
     issues = []
@@ -70,7 +70,7 @@ def health():
     uptime = int(time.time() - _start_time)
     avg_latency = int(_total_latency / _request_count) if _request_count > 0 else 0
 
-    return jsonify({
+    return {
         "status": status,
         "model": OLLAMA_MODEL,
         "model_loaded": ollama_status.get("available", False),
@@ -83,4 +83,4 @@ def health():
         "requests_processed": _request_count,
         "average_response_time_ms": avg_latency,
         "issues": issues if issues else None,
-    })
+    }

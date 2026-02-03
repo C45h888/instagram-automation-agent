@@ -2,18 +2,25 @@
 Agent Service
 ==============
 Lightweight LLM+tools layer using llm.bind_tools() (NOT AgentExecutor).
-Single-pass: LLM receives tools → may call them → we execute → return result.
+Single-pass: LLM receives tools -> may call them -> we execute -> return result.
 
+Includes asyncio.Semaphore to limit concurrent Ollama inferences and protect CPU.
 Upgrade path: If multi-step reasoning is needed later, swap to AgentExecutor.
 The tools and prompts are already compatible.
 """
 
+import asyncio
 import json
+import os
 import re
 import time
 
 from config import llm, logger
 from tools import SUPABASE_TOOLS
+
+# Configurable max concurrent LLM inferences (protects Ollama CPU)
+MAX_CONCURRENT_LLM = int(os.getenv("MAX_CONCURRENT_LLM", "4"))
+_llm_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM)
 
 
 class AgentService:
@@ -22,10 +29,22 @@ class AgentService:
     def __init__(self):
         self.llm_with_tools = llm.bind_tools(SUPABASE_TOOLS)
         self._tool_map = {t.name: t for t in SUPABASE_TOOLS}
-        logger.info(f"AgentService initialized with {len(SUPABASE_TOOLS)} tools: {list(self._tool_map.keys())}")
+        logger.info(
+            f"AgentService initialized with {len(SUPABASE_TOOLS)} tools "
+            f"(max_concurrent={MAX_CONCURRENT_LLM}): {list(self._tool_map.keys())}"
+        )
 
-    def analyze(self, prompt: str) -> dict:
-        """Invoke LLM with bound tools. Single-pass tool execution.
+    async def analyze_async(self, prompt: str) -> dict:
+        """Async entry point with semaphore-limited concurrency.
+
+        Acquires the semaphore before running the blocking LLM call in a thread pool.
+        At most MAX_CONCURRENT_LLM inferences run simultaneously.
+        """
+        async with _llm_semaphore:
+            return await asyncio.to_thread(self._analyze_sync, prompt)
+
+    def _analyze_sync(self, prompt: str) -> dict:
+        """Synchronous LLM invocation with single-pass tool execution.
 
         Flow:
           1. Send prompt to LLM with tools bound
@@ -69,6 +88,9 @@ class AgentService:
                 "message": str(e),
                 "_latency_ms": latency_ms,
             }
+
+    # Keep backward compat alias
+    analyze = _analyze_sync
 
     def _execute_tool_calls(self, tool_calls: list) -> dict:
         """Execute tool calls requested by the LLM."""

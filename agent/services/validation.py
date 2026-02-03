@@ -1,7 +1,4 @@
-import os
 import re
-from functools import wraps
-from flask import request, jsonify
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
@@ -28,30 +25,6 @@ def _validate_uuid_format(value: str) -> str:
     if not uuid_pattern.match(value):
         raise ValueError(f"Invalid UUID format: {value}")
     return value
-
-
-# ================================
-# API Key Authentication Decorator
-# (kept for backward compat — will be replaced by middleware in Step 9)
-# ================================
-def require_api_key(f):
-    """Decorator to enforce X-API-Key header on approval routes."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        api_key = os.getenv("AGENT_API_KEY", "")
-        if not api_key:
-            # No key configured - skip auth (dev mode)
-            return f(*args, **kwargs)
-
-        provided_key = request.headers.get("X-API-Key", "")
-        if provided_key != api_key:
-            return jsonify({
-                "error": "unauthorized",
-                "message": "Invalid or missing X-API-Key header"
-            }), 401
-
-        return f(*args, **kwargs)
-    return decorated
 
 
 # ================================
@@ -138,18 +111,3 @@ class PostApprovalRequest(BaseModel):
     @classmethod
     def validate_account_id(cls, v):
         return _validate_uuid_format(v)
-
-
-def validate_request(model_class, data: dict):
-    """Validate request data against a Pydantic model.
-    Returns (parsed_model, None) on success or (None, error_response) on failure.
-    """
-    try:
-        parsed = model_class(**data)
-        return parsed, None
-    except Exception as e:
-        error_msg = str(e)
-        return None, jsonify({
-            "error": "validation_error",
-            "message": f"Invalid request payload: {error_msg}"
-        })

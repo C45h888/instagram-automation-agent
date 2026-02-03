@@ -61,7 +61,18 @@ def validate_schema():
             logger.error(f"SCHEMA MISMATCH: {table} — {e}")
             sys.exit(1)
 
-    logger.info("All schema validations passed")
+    logger.info("All required schema validations passed")
+
+    # Optional tables (warn instead of crash if missing)
+    optional_tables = {
+        "prompt_templates": ["prompt_key", "template", "version", "is_active"],
+    }
+    for table, columns in optional_tables.items():
+        try:
+            supabase.table(table).select(",".join(columns)).limit(0).execute()
+            logger.info(f"Schema OK (optional): {table}")
+        except Exception:
+            logger.warning(f"Optional table '{table}' not found — using default prompts")
 
 
 # Run startup checks

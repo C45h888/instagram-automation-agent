@@ -1,43 +1,32 @@
-from flask import Blueprint, request, jsonify
-from services.validation import CommentApprovalRequest, validate_request
+from fastapi import APIRouter, Request
+from services.validation import CommentApprovalRequest
 from services.supabase_service import SupabaseService
-from routes.approve_base import run_approval
-from prompts import PROMPTS
-from config import logger
+from routes.approve_base import ApprovalConfig, approval_pipeline
+from services.prompt_service import PromptService
 
-approve_comment_bp = Blueprint("approve_comment", __name__)
+approve_comment_router = APIRouter()
 
 
-@approve_comment_bp.route("/approve/comment-reply", methods=["POST"])
-def approve_comment_reply():
-    """Approve or reject a proposed comment reply from N8N.
+# ================================
+# Hooks
+# ================================
+def _fetch_context(parsed):
+    return {
+        "post": SupabaseService.get_post_context(parsed.post_id),
+        "account": SupabaseService.get_account_info(parsed.business_account_id),
+    }
 
-    N8N sends proposed reply + context → Agent evaluates → returns decision.
-    Auth handled by middleware (no @require_api_key needed).
-    """
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "validation_error", "message": "Request body must be JSON"}), 400
 
-    # Validate request
-    parsed, error = validate_request(CommentApprovalRequest, data)
-    if error:
-        return error, 400
-
-    # Fetch context from Supabase
-    post_context = SupabaseService.get_post_context(parsed.post_id)
-    account_info = SupabaseService.get_account_info(parsed.business_account_id)
-
-    # Build prompt with all context
-    prompt = PROMPTS["comment"].format(
-        account_username=account_info.get("username", "unknown"),
-        account_type=account_info.get("name", "business"),
+def _build_prompt(parsed, ctx):
+    return PromptService.get("comment").format(
+        account_username=ctx["account"].get("username", "unknown"),
+        account_type=ctx["account"].get("name", "business"),
         business_account_id=parsed.business_account_id,
         post_id=parsed.post_id,
-        post_caption=post_context.get("caption", "N/A")[:300],
-        like_count=post_context.get("like_count", 0),
-        comments_count=post_context.get("comments_count", 0),
-        engagement_rate=post_context.get("engagement_rate", 0),
+        post_caption=ctx["post"].get("caption", "N/A")[:300],
+        like_count=ctx["post"].get("like_count", 0),
+        comments_count=ctx["post"].get("comments_count", 0),
+        engagement_rate=ctx["post"].get("engagement_rate", 0),
         comment_text=parsed.comment_text[:500],
         commenter_username=parsed.commenter_username or "unknown",
         detected_intent=parsed.detected_intent,
@@ -45,52 +34,51 @@ def approve_comment_reply():
         proposed_reply=parsed.proposed_reply[:500],
     )
 
-    # Invoke agent with tools
-    result, status_code = run_approval(prompt, "comment")
-    if status_code != 200:
-        return jsonify(result), status_code
 
-    # Build response
-    latency = result.pop("_latency_ms", 0)
-    tools_called = result.pop("_tools_called", [])
-
-    approved = result.get("approved", False)
-    modifications = result.get("modifications")
-    quality_score = result.get("quality_score", 0)
-    reasoning = result.get("reasoning", "No reasoning provided")
-
-    response = {
-        "approved": approved,
-        "modifications": modifications,
-        "decision_reasoning": reasoning,
+def _build_response(parsed, result, latency, tools_called):
+    return {
+        "approved": result.get("approved", False),
+        "modifications": result.get("modifications"),
+        "decision_reasoning": result.get("reasoning", "No reasoning provided"),
         "confidence": parsed.confidence,
-        "quality_score": quality_score,
+        "quality_score": result.get("quality_score", 0),
         "sentiment": parsed.sentiment,
-        "audit_data": {
-            "analyzed_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-            "agent_model": "nemotron:8b-q5_K_M",
-            "latency_ms": latency,
-            "tools_called": tools_called,
-            "analysis_factors": ["sentiment", "tone", "relevance", "brand_voice"],
-            "context_used": ["post_caption", "engagement_metrics", "account_info"]
-        }
     }
 
-    # Log to audit_log
-    SupabaseService.log_decision(
-        event_type="comment_reply_approval",
-        action="approved" if approved else "rejected",
-        resource_type="comment",
-        resource_id=parsed.comment_id,
-        user_id=parsed.business_account_id,
-        details={
-            "proposed_reply": parsed.proposed_reply,
-            "approved_reply": modifications.get("reply_text") if modifications else None,
-            "quality_score": quality_score,
-            "reasoning": reasoning,
-            "latency_ms": latency
-        },
-        ip_address=request.remote_addr
-    )
 
-    return jsonify(response)
+def _build_audit_details(parsed, result, latency):
+    mods = result.get("modifications")
+    return {
+        "proposed_reply": parsed.proposed_reply,
+        "approved_reply": mods.get("reply_text") if mods else None,
+        "quality_score": result.get("quality_score", 0),
+        "reasoning": result.get("reasoning", ""),
+        "latency_ms": latency,
+    }
+
+
+# ================================
+# Config
+# ================================
+_config = ApprovalConfig(
+    task_type="comment",
+    event_type="comment_reply_approval",
+    resource_type="comment",
+    analysis_factors=["sentiment", "tone", "relevance", "brand_voice"],
+    context_used=["post_caption", "engagement_metrics", "account_info"],
+    get_resource_id=lambda p: p.comment_id,
+    get_user_id=lambda p: p.business_account_id,
+    fetch_context=_fetch_context,
+    build_prompt=_build_prompt,
+    build_response=_build_response,
+    build_audit_details=_build_audit_details,
+)
+
+
+# ================================
+# Route
+# ================================
+@approve_comment_router.post("/approve/comment-reply")
+async def approve_comment_reply(parsed: CommentApprovalRequest, request: Request):
+    """Approve or reject a proposed comment reply from N8N."""
+    return await approval_pipeline(parsed, request, _config)

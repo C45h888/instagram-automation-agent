@@ -15,78 +15,27 @@ Endpoints:
 """
 
 import os
-from flask import Flask, jsonify
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+import uuid as uuid_mod
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
 from config import logger, OLLAMA_HOST, OLLAMA_MODEL
 from middleware import api_key_middleware
+from services.prompt_service import PromptService
 
-# Import route blueprints
-from routes import health_bp, approve_comment_bp, approve_dm_bp, approve_post_bp, metrics_bp
+# Import route routers
+from routes import health_router, approve_comment_router, approve_dm_router, approve_post_router, metrics_router
 
 
-def create_app():
-    """Flask application factory."""
-    app = Flask(__name__)
-
-    # --- Middleware: API key auth ---
-    api_key_middleware(app)
-
-    # --- Rate limiting (Redis-backed for distributed state) ---
-    redis_host = os.getenv("REDIS_HOST", "redis")
-    redis_port = os.getenv("REDIS_PORT", "6379")
-
-    limiter = Limiter(
-        get_remote_address,
-        app=app,
-        default_limits=["60 per minute"],
-        storage_uri=f"redis://{redis_host}:{redis_port}",
-        strategy="fixed-window",
-    )
-
-    # Stricter limits on approval endpoints
-    limiter.limit("30 per minute")(approve_comment_bp)
-    limiter.limit("30 per minute")(approve_dm_bp)
-    limiter.limit("30 per minute")(approve_post_bp)
-
-    # Register blueprints
-    app.register_blueprint(health_bp)
-    app.register_blueprint(approve_comment_bp)
-    app.register_blueprint(approve_dm_bp)
-    app.register_blueprint(approve_post_bp)
-    app.register_blueprint(metrics_bp)
-
-    # Global error handlers
-    @app.errorhandler(404)
-    def not_found(e):
-        return jsonify({
-            "error": "not_found",
-            "message": "Endpoint not found. Available: /health, /approve/comment-reply, /approve/dm-reply, /approve/post"
-        }), 404
-
-    @app.errorhandler(405)
-    def method_not_allowed(e):
-        return jsonify({
-            "error": "method_not_allowed",
-            "message": "Use POST for /approve/* endpoints, GET for /health"
-        }), 405
-
-    @app.errorhandler(429)
-    def rate_limited(e):
-        return jsonify({
-            "error": "rate_limited",
-            "message": "Too many requests. Please slow down."
-        }), 429
-
-    @app.errorhandler(500)
-    def internal_error(e):
-        logger.error(f"Unhandled error: {e}")
-        return jsonify({
-            "error": "internal_error",
-            "message": "An unexpected error occurred. Check agent logs."
-        }), 500
-
-    # Startup info
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown lifecycle."""
     logger.info("=" * 60)
     logger.info("Oversight Brain Agent starting up")
     logger.info(f"  Ollama Host: {OLLAMA_HOST}")
@@ -94,14 +43,87 @@ def create_app():
     logger.info(f"  Rate Limit: 60/min global, 30/min on /approve/*")
     logger.info(f"  Endpoints: /health, /metrics, /approve/comment-reply, /approve/dm-reply, /approve/post")
     logger.info("=" * 60)
+    # Load prompts from DB (falls back to static defaults)
+    PromptService.load()
+    yield
+    # Shutdown cleanup (if needed in future)
 
-    return app
+
+app = FastAPI(
+    title="Oversight Brain Agent",
+    description="Central approval authority for Instagram automation workflows",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+# --- Rate limiting (Redis-backed for distributed state) ---
+redis_host = os.getenv("REDIS_HOST", "redis")
+redis_port = os.getenv("REDIS_PORT", "6379")
+
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=f"redis://{redis_host}:{redis_port}",
+    default_limits=["60/minute"],
+)
+app.state.limiter = limiter
+
+# --- Middleware: API key auth ---
+app.middleware("http")(api_key_middleware)
+
+# --- Register routers ---
+app.include_router(health_router)
+app.include_router(approve_comment_router)
+app.include_router(approve_dm_router)
+app.include_router(approve_post_router)
+app.include_router(metrics_router)
 
 
-# Create the app instance (used by gunicorn: gunicorn agent:app)
-app = create_app()
+# ================================
+# Global Error Handlers
+# ================================
+@app.exception_handler(RequestValidationError)
+async def validation_exception(request: Request, exc: RequestValidationError):
+    """Override FastAPI's default 422 to return 400 for N8N backward compatibility."""
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "validation_error",
+            "message": f"Invalid request payload: {exc.errors()}",
+            "request_id": str(uuid_mod.uuid4()),
+        }
+    )
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limited(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "rate_limited",
+            "message": "Too many requests. Please slow down.",
+            "request_id": str(uuid_mod.uuid4()),
+        }
+    )
+
+
+@app.exception_handler(Exception)
+async def catch_all_exception(request: Request, exc: Exception):
+    """Catch-all handler — every unhandled exception returns structured JSON."""
+    request_id = str(uuid_mod.uuid4())
+    logger.error(f"Unhandled exception [request_id={request_id}]: {type(exc).__name__}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal_error",
+            "error_type": type(exc).__name__,
+            "message": "An unexpected error occurred. Check agent logs.",
+            "request_id": request_id,
+        }
+    )
+
 
 # Dev server fallback
 if __name__ == "__main__":
+    import uvicorn
     port = int(os.getenv("FLASK_PORT", 3002))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    uvicorn.run(app, host="0.0.0.0", port=port)

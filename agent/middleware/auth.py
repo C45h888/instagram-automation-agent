@@ -2,35 +2,36 @@
 API Key Middleware
 ==================
 Enforces X-API-Key authentication on all routes except explicitly public ones.
-Replaces per-route @require_api_key decorators with a single before_request hook.
+FastAPI/Starlette middleware replaces the old Flask before_request hook.
 """
 
 import os
-from flask import request, jsonify
+from fastapi import Request
+from fastapi.responses import JSONResponse
 
 # Paths that skip authentication (opt-in allowlist)
-PUBLIC_PATHS = {"/health", "/metrics"}
+PUBLIC_PATHS = {"/health", "/metrics", "/docs", "/openapi.json"}
 
 
-def api_key_middleware(app):
-    """Register a before_request hook that checks X-API-Key on protected routes."""
+async def api_key_middleware(request: Request, call_next):
+    """Check X-API-Key on protected routes."""
+    if request.url.path in PUBLIC_PATHS:
+        return await call_next(request)
+
     api_key = os.getenv("AGENT_API_KEY", "")
 
-    @app.before_request
-    def check_api_key():
-        # Skip auth for public endpoints
-        if request.path in PUBLIC_PATHS:
-            return None
+    # If no key configured, skip auth (dev mode)
+    if not api_key:
+        return await call_next(request)
 
-        # If no key configured, skip auth (dev mode)
-        if not api_key:
-            return None
-
-        provided = request.headers.get("X-API-Key", "")
-        if provided != api_key:
-            return jsonify({
+    provided = request.headers.get("X-API-Key", "")
+    if provided != api_key:
+        return JSONResponse(
+            status_code=401,
+            content={
                 "error": "unauthorized",
                 "message": "Invalid or missing X-API-Key header"
-            }), 401
+            }
+        )
 
-        return None
+    return await call_next(request)

@@ -16,5 +16,5 @@ COPY . .
 
 EXPOSE 3002
 
-# Run with gunicorn + gevent for async concurrency (4 workers for 8 vCPU)
-CMD ["gunicorn", "-k", "gevent", "-w", "4", "-b", "0.0.0.0:3002", "--timeout", "30", "agent:app"]
+# Run with uvicorn (4 workers for 8 vCPU Hetzner box)
+CMD ["uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "3002", "--workers", "4", "--timeout-keep-alive", "30"]
