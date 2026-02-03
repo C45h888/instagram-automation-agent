@@ -1,12 +1,38 @@
 import os
+import re
 from functools import wraps
 from flask import request, jsonify
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
+
+import bleach
 
 
 # ================================
-# API Key Authentication Middleware
+# Sanitization Helpers
+# ================================
+def _sanitize_text(value: str, max_length: int = 2000) -> str:
+    """Strip all HTML tags and cap length. Prevents XSS/injection."""
+    if not isinstance(value, str):
+        return str(value)[:max_length]
+    cleaned = bleach.clean(value, tags=[], strip=True)
+    return cleaned[:max_length]
+
+
+def _validate_uuid_format(value: str) -> str:
+    """Validate that a string looks like a UUID."""
+    uuid_pattern = re.compile(
+        r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+        re.IGNORECASE
+    )
+    if not uuid_pattern.match(value):
+        raise ValueError(f"Invalid UUID format: {value}")
+    return value
+
+
+# ================================
+# API Key Authentication Decorator
+# (kept for backward compat — will be replaced by middleware in Step 9)
 # ================================
 def require_api_key(f):
     """Decorator to enforce X-API-Key header on approval routes."""
@@ -29,7 +55,7 @@ def require_api_key(f):
 
 
 # ================================
-# Pydantic Request Models
+# Pydantic Request Models (with sanitization)
 # ================================
 class CommentApprovalRequest(BaseModel):
     comment_id: str
@@ -41,6 +67,16 @@ class CommentApprovalRequest(BaseModel):
     sentiment: str = "neutral"
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     commenter_username: Optional[str] = None
+
+    @field_validator("comment_text", "proposed_reply", mode="before")
+    @classmethod
+    def sanitize_text(cls, v):
+        return _sanitize_text(v, max_length=2000)
+
+    @field_validator("business_account_id", mode="before")
+    @classmethod
+    def validate_account_id(cls, v):
+        return _validate_uuid_format(v)
 
 
 class CustomerHistory(BaseModel):
@@ -62,6 +98,16 @@ class DMApprovalRequest(BaseModel):
     priority: str = "medium"
     customer_history: Optional[CustomerHistory] = None
 
+    @field_validator("dm_text", "proposed_reply", mode="before")
+    @classmethod
+    def sanitize_text(cls, v):
+        return _sanitize_text(v, max_length=2000)
+
+    @field_validator("business_account_id", mode="before")
+    @classmethod
+    def validate_account_id(cls, v):
+        return _validate_uuid_format(v)
+
 
 class AssetInfo(BaseModel):
     public_id: str = ""
@@ -82,6 +128,16 @@ class PostApprovalRequest(BaseModel):
     engagement_prediction: float = 0.0
     post_type: str = "general"
     scheduled_time: str = ""
+
+    @field_validator("proposed_caption", mode="before")
+    @classmethod
+    def sanitize_caption(cls, v):
+        return _sanitize_text(v, max_length=2200)
+
+    @field_validator("business_account_id", mode="before")
+    @classmethod
+    def validate_account_id(cls, v):
+        return _validate_uuid_format(v)
 
 
 def validate_request(model_class, data: dict):

@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -21,7 +22,51 @@ logger = logging.getLogger("oversight-agent")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+if not SUPABASE_URL or not SUPABASE_KEY:
+    logger.error("FATAL: SUPABASE_URL and SUPABASE_KEY environment variables are required")
+    sys.exit(1)
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+def verify_supabase_connection():
+    """Test Supabase connectivity on startup. Crashes if unreachable."""
+    try:
+        supabase.table("audit_log").select("id").limit(1).execute()
+        logger.info("Supabase connection verified successfully")
+    except Exception as e:
+        logger.error(f"FATAL: Supabase connection failed: {e}")
+        sys.exit(1)
+
+
+def validate_schema():
+    """Verify DB schema matches code expectations at startup.
+
+    Prevents silent mismatches — if a column was renamed or table dropped,
+    the agent crashes immediately instead of returning wrong data.
+    """
+    required = {
+        "instagram_media": ["caption", "like_count", "comments_count", "reach", "published_at"],
+        "instagram_business_accounts": ["username", "name", "account_type", "followers_count"],
+        "instagram_comments": ["text", "sentiment", "business_account_id", "created_at"],
+        "instagram_dm_conversations": ["customer_instagram_id", "business_account_id", "within_window"],
+        "instagram_dm_messages": ["message_text", "conversation_id", "is_from_business", "sent_at"],
+        "audit_log": ["event_type", "action", "details", "resource_type"],
+    }
+    for table, columns in required.items():
+        try:
+            supabase.table(table).select(",".join(columns)).limit(0).execute()
+            logger.info(f"Schema OK: {table}")
+        except Exception as e:
+            logger.error(f"SCHEMA MISMATCH: {table} — {e}")
+            sys.exit(1)
+
+    logger.info("All schema validations passed")
+
+
+# Run startup checks
+verify_supabase_connection()
+validate_schema()
 
 # ================================
 # Ollama / Nemotron LLM

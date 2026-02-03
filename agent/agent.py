@@ -8,6 +8,7 @@ and returns approve/reject/modify decisions.
 
 Endpoints:
   GET  /health                 - Health check (Ollama + Supabase status)
+  GET  /metrics                - Prometheus metrics
   POST /approve/comment-reply  - Approve/reject comment reply
   POST /approve/dm-reply       - Approve/reject DM reply (with escalation)
   POST /approve/post           - Approve/reject post caption
@@ -15,21 +16,45 @@ Endpoints:
 
 import os
 from flask import Flask, jsonify
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from config import logger, OLLAMA_HOST, OLLAMA_MODEL
+from middleware import api_key_middleware
 
 # Import route blueprints
-from routes import health_bp, approve_comment_bp, approve_dm_bp, approve_post_bp
+from routes import health_bp, approve_comment_bp, approve_dm_bp, approve_post_bp, metrics_bp
 
 
 def create_app():
     """Flask application factory."""
     app = Flask(__name__)
 
+    # --- Middleware: API key auth ---
+    api_key_middleware(app)
+
+    # --- Rate limiting (Redis-backed for distributed state) ---
+    redis_host = os.getenv("REDIS_HOST", "redis")
+    redis_port = os.getenv("REDIS_PORT", "6379")
+
+    limiter = Limiter(
+        get_remote_address,
+        app=app,
+        default_limits=["60 per minute"],
+        storage_uri=f"redis://{redis_host}:{redis_port}",
+        strategy="fixed-window",
+    )
+
+    # Stricter limits on approval endpoints
+    limiter.limit("30 per minute")(approve_comment_bp)
+    limiter.limit("30 per minute")(approve_dm_bp)
+    limiter.limit("30 per minute")(approve_post_bp)
+
     # Register blueprints
     app.register_blueprint(health_bp)
     app.register_blueprint(approve_comment_bp)
     app.register_blueprint(approve_dm_bp)
     app.register_blueprint(approve_post_bp)
+    app.register_blueprint(metrics_bp)
 
     # Global error handlers
     @app.errorhandler(404)
@@ -46,6 +71,13 @@ def create_app():
             "message": "Use POST for /approve/* endpoints, GET for /health"
         }), 405
 
+    @app.errorhandler(429)
+    def rate_limited(e):
+        return jsonify({
+            "error": "rate_limited",
+            "message": "Too many requests. Please slow down."
+        }), 429
+
     @app.errorhandler(500)
     def internal_error(e):
         logger.error(f"Unhandled error: {e}")
@@ -59,7 +91,8 @@ def create_app():
     logger.info("Oversight Brain Agent starting up")
     logger.info(f"  Ollama Host: {OLLAMA_HOST}")
     logger.info(f"  Model: {OLLAMA_MODEL}")
-    logger.info(f"  Endpoints: /health, /approve/comment-reply, /approve/dm-reply, /approve/post")
+    logger.info(f"  Rate Limit: 60/min global, 30/min on /approve/*")
+    logger.info(f"  Endpoints: /health, /metrics, /approve/comment-reply, /approve/dm-reply, /approve/post")
     logger.info("=" * 60)
 
     return app

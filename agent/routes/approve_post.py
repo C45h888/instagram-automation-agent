@@ -1,9 +1,8 @@
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
-from services.validation import require_api_key, PostApprovalRequest, validate_request
+from services.validation import PostApprovalRequest, validate_request
 from services.supabase_service import SupabaseService
-from services.llm_service import LLMService
-from routes.health import track_request
+from routes.approve_base import run_approval
 from prompts import PROMPTS
 from config import logger, MAX_CAPTION_LENGTH, MAX_HASHTAG_COUNT
 
@@ -11,11 +10,11 @@ approve_post_bp = Blueprint("approve_post", __name__)
 
 
 @approve_post_bp.route("/approve/post", methods=["POST"])
-@require_api_key
 def approve_post():
     """Approve or reject a proposed post caption from N8N.
 
     Includes hard rules for hashtag count and caption length.
+    Auth handled by middleware.
     """
     data = request.get_json(silent=True)
     if not data:
@@ -76,8 +75,9 @@ def approve_post():
     asset_tags = parsed.asset.tags if parsed.asset else []
 
     prompt = PROMPTS["post"].format(
-        account_username=account_info.get("instagram_business_username", "unknown"),
+        account_username=account_info.get("username", "unknown"),
         account_type=account_info.get("name", "business"),
+        business_account_id=parsed.business_account_id,
         proposed_caption=parsed.proposed_caption[:2200],
         hashtags=", ".join(parsed.hashtags) if parsed.hashtags else "none",
         hashtag_count=actual_hashtag_count,
@@ -90,19 +90,13 @@ def approve_post():
         avg_engagement_rate=performance.get("avg_engagement_rate", 0),
     )
 
-    # Invoke Nemotron
-    result = LLMService.analyze(prompt)
-
-    if "error" in result and result["error"] != "json_parse_failed":
-        logger.error(f"LLM failed for post approval: {result}")
-        return jsonify({
-            "approved": "pending_manual_review",
-            "error": "model_unavailable",
-            "message": "AI model could not process request. Please retry.",
-        }), 503
+    # Invoke agent with tools
+    result, status_code = run_approval(prompt, "post")
+    if status_code != 200:
+        return jsonify(result), status_code
 
     latency = result.pop("_latency_ms", 0)
-    track_request(latency)
+    tools_called = result.pop("_tools_called", [])
 
     approved = result.get("approved", False)
     modifications = result.get("modifications")
@@ -121,6 +115,7 @@ def approve_post():
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
             "agent_model": "nemotron:8b-q5_K_M",
             "latency_ms": latency,
+            "tools_called": tools_called,
             "analysis_factors": ["caption_quality", "brand_alignment", "hashtag_strategy", "engagement_potential", "compliance"],
             "context_used": ["account_info", "post_performance_benchmarks"]
         }

@@ -113,6 +113,32 @@ services:
           memory: 6G
 
   # ================================
+  # Redis Cache (for agent)
+  # ================================
+  redis:
+    image: redis:7-alpine
+    container_name: agent-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - instagram-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  # ================================
   # LangChain Oversight Brain Agent
   # ================================
   langchain-agent:
@@ -128,8 +154,12 @@ services:
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - FLASK_PORT=3002
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     depends_on:
       ollama:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - instagram-network

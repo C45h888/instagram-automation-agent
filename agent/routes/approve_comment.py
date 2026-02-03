@@ -1,8 +1,7 @@
 from flask import Blueprint, request, jsonify
-from services.validation import require_api_key, CommentApprovalRequest, validate_request
+from services.validation import CommentApprovalRequest, validate_request
 from services.supabase_service import SupabaseService
-from services.llm_service import LLMService
-from routes.health import track_request
+from routes.approve_base import run_approval
 from prompts import PROMPTS
 from config import logger
 
@@ -10,11 +9,11 @@ approve_comment_bp = Blueprint("approve_comment", __name__)
 
 
 @approve_comment_bp.route("/approve/comment-reply", methods=["POST"])
-@require_api_key
 def approve_comment_reply():
     """Approve or reject a proposed comment reply from N8N.
 
     N8N sends proposed reply + context → Agent evaluates → returns decision.
+    Auth handled by middleware (no @require_api_key needed).
     """
     data = request.get_json(silent=True)
     if not data:
@@ -31,8 +30,10 @@ def approve_comment_reply():
 
     # Build prompt with all context
     prompt = PROMPTS["comment"].format(
-        account_username=account_info.get("instagram_business_username", "unknown"),
+        account_username=account_info.get("username", "unknown"),
         account_type=account_info.get("name", "business"),
+        business_account_id=parsed.business_account_id,
+        post_id=parsed.post_id,
         post_caption=post_context.get("caption", "N/A")[:300],
         like_count=post_context.get("like_count", 0),
         comments_count=post_context.get("comments_count", 0),
@@ -44,22 +45,15 @@ def approve_comment_reply():
         proposed_reply=parsed.proposed_reply[:500],
     )
 
-    # Invoke Nemotron
-    result = LLMService.analyze(prompt)
-
-    # Handle LLM failure
-    if "error" in result and result["error"] != "json_parse_failed":
-        logger.error(f"LLM failed for comment approval: {result}")
-        return jsonify({
-            "approved": "pending_manual_review",
-            "error": "model_unavailable",
-            "message": "AI model could not process request. Please retry.",
-        }), 503
-
-    latency = result.pop("_latency_ms", 0)
-    track_request(latency)
+    # Invoke agent with tools
+    result, status_code = run_approval(prompt, "comment")
+    if status_code != 200:
+        return jsonify(result), status_code
 
     # Build response
+    latency = result.pop("_latency_ms", 0)
+    tools_called = result.pop("_tools_called", [])
+
     approved = result.get("approved", False)
     modifications = result.get("modifications")
     quality_score = result.get("quality_score", 0)
@@ -76,6 +70,7 @@ def approve_comment_reply():
             "analyzed_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
             "agent_model": "nemotron:8b-q5_K_M",
             "latency_ms": latency,
+            "tools_called": tools_called,
             "analysis_factors": ["sentiment", "tone", "relevance", "brand_voice"],
             "context_used": ["post_caption", "engagement_metrics", "account_info"]
         }

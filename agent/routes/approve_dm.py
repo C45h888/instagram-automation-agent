@@ -1,9 +1,8 @@
 from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
-from services.validation import require_api_key, DMApprovalRequest, validate_request
+from services.validation import DMApprovalRequest, validate_request
 from services.supabase_service import SupabaseService
-from services.llm_service import LLMService
-from routes.health import track_request
+from routes.approve_base import run_approval
 from prompts import PROMPTS
 from config import logger, VIP_LIFETIME_VALUE_THRESHOLD, ESCALATION_INTENTS
 
@@ -11,11 +10,12 @@ approve_dm_bp = Blueprint("approve_dm", __name__)
 
 
 @approve_dm_bp.route("/approve/dm-reply", methods=["POST"])
-@require_api_key
 def approve_dm_reply():
     """Approve or reject a proposed DM reply from N8N.
 
     Includes escalation logic for VIP customers, negative sentiment, and complaints.
+    Hard rules stay in this route — never delegated to LLM.
+    Auth handled by middleware.
     """
     data = request.get_json(silent=True)
     if not data:
@@ -110,9 +110,11 @@ def approve_dm_reply():
 
     # Build prompt
     prompt = PROMPTS["dm"].format(
-        account_username=account_info.get("instagram_business_username", "unknown"),
+        account_username=account_info.get("username", "unknown"),
+        business_account_id=parsed.business_account_id,
         dm_text=parsed.dm_text[:500],
         sender_username=parsed.sender_username,
+        sender_id=parsed.sender_id,
         detected_intent=parsed.detected_intent,
         sentiment=parsed.sentiment,
         priority=parsed.priority,
@@ -124,19 +126,13 @@ def approve_dm_reply():
         proposed_reply=parsed.proposed_reply[:300],
     )
 
-    # Invoke Nemotron
-    result = LLMService.analyze(prompt)
-
-    if "error" in result and result["error"] != "json_parse_failed":
-        logger.error(f"LLM failed for DM approval: {result}")
-        return jsonify({
-            "approved": "pending_manual_review",
-            "error": "model_unavailable",
-            "message": "AI model could not process request. Please retry.",
-        }), 503
+    # Invoke agent with tools
+    result, status_code = run_approval(prompt, "dm")
+    if status_code != 200:
+        return jsonify(result), status_code
 
     latency = result.pop("_latency_ms", 0)
-    track_request(latency)
+    tools_called = result.pop("_tools_called", [])
 
     approved = result.get("approved", False)
     modifications = result.get("modifications")
@@ -155,6 +151,7 @@ def approve_dm_reply():
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
             "agent_model": "nemotron:8b-q5_K_M",
             "latency_ms": latency,
+            "tools_called": tools_called,
             "analysis_factors": ["appropriateness", "personalization", "escalation_need", "format"],
             "context_used": ["account_info", "dm_history", "customer_history"]
         }
