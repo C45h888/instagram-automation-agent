@@ -67,6 +67,17 @@ limiter = Limiter(
 )
 app.state.limiter = limiter
 
+# --- Middleware: Request ID tracing ---
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    """Generate unique request ID for tracing through logs and audit."""
+    request_id = str(uuid_mod.uuid4())
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
 # --- Middleware: API key auth ---
 app.middleware("http")(api_key_middleware)
 
@@ -81,27 +92,34 @@ app.include_router(metrics_router)
 # ================================
 # Global Error Handlers
 # ================================
+def _get_request_id(request: Request) -> str:
+    """Get request ID from state or generate new one."""
+    return getattr(request.state, "request_id", str(uuid_mod.uuid4()))
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception(request: Request, exc: RequestValidationError):
     """Override FastAPI's default 422 to return 400 for N8N backward compatibility."""
+    request_id = _get_request_id(request)
     return JSONResponse(
         status_code=400,
         content={
             "error": "validation_error",
             "message": f"Invalid request payload: {exc.errors()}",
-            "request_id": str(uuid_mod.uuid4()),
+            "request_id": request_id,
         }
     )
 
 
 @app.exception_handler(RateLimitExceeded)
 async def rate_limited(request: Request, exc: RateLimitExceeded):
+    request_id = _get_request_id(request)
     return JSONResponse(
         status_code=429,
         content={
             "error": "rate_limited",
             "message": "Too many requests. Please slow down.",
-            "request_id": str(uuid_mod.uuid4()),
+            "request_id": request_id,
         }
     )
 
@@ -109,7 +127,7 @@ async def rate_limited(request: Request, exc: RateLimitExceeded):
 @app.exception_handler(Exception)
 async def catch_all_exception(request: Request, exc: Exception):
     """Catch-all handler — every unhandled exception returns structured JSON."""
-    request_id = str(uuid_mod.uuid4())
+    request_id = _get_request_id(request)
     logger.error(f"Unhandled exception [request_id={request_id}]: {type(exc).__name__}: {exc}")
     return JSONResponse(
         status_code=500,

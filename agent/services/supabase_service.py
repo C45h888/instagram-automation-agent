@@ -7,7 +7,7 @@ All queries match the REAL database schema (Supabase is source of truth).
 Features:
   - Retry with exponential backoff (tenacity)
   - Circuit breaker (pybreaker) — fail fast when DB is down
-  - Redis caching for frequent queries (distributed, survives restarts)
+  - Two-tier caching: L1 in-memory (cachetools) + L2 Redis (distributed)
   - Graceful fallback when Redis is unavailable
 """
 
@@ -17,10 +17,21 @@ import uuid
 from datetime import datetime, timezone
 
 import redis
+from cachetools import TTLCache
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from pybreaker import CircuitBreaker, CircuitBreakerError
 
 from config import supabase, logger
+from routes.metrics import DB_QUERY_COUNT, CACHE_HITS, CACHE_MISSES
+
+
+# ================================
+# In-Memory L1 Cache (cachetools)
+# ================================
+# L1 avoids Redis round-trips for hot data (~2-5ms saved per hit)
+# TTLs match Redis TTLs so expiration is consistent
+_post_context_cache: TTLCache = TTLCache(maxsize=100, ttl=30)
+_account_info_cache: TTLCache = TTLCache(maxsize=50, ttl=60)
 
 
 # ================================
@@ -74,12 +85,14 @@ db_breaker = CircuitBreaker(fail_max=5, reset_timeout=30)
     retry=retry_if_exception_type((ConnectionError, TimeoutError, OSError)),
     reraise=True,
 )
-def _execute_query(query):
+def _execute_query(query, table: str = "unknown", operation: str = "select"):
     """Execute a Supabase query with retry + circuit breaker.
 
     - Tenacity retries transient failures (3 attempts, exponential backoff)
     - Circuit breaker opens after 5 consecutive failures, fails fast for 30s
+    - Tracks DB query metrics
     """
+    DB_QUERY_COUNT.labels(table=table, operation=operation).inc()
     return query.execute()
 
 
@@ -130,22 +143,39 @@ class SupabaseService:
 
         Note: engagement_rate is COMPUTED (column does not exist in DB).
         Formula: (like_count + comments_count) / reach if reach > 0
+
+        Caching: L1 in-memory (30s TTL) -> L2 Redis (30s TTL) -> Supabase
         """
         if not supabase or not post_id:
             return {}
 
-        # Check cache first
         cache_key = f"post_ctx:{post_id}"
+
+        # L1: Check in-memory cache first (fastest)
+        if cache_key in _post_context_cache:
+            logger.debug(f"L1 cache hit for {cache_key}")
+            CACHE_HITS.labels(key_type="post_context_l1").inc()
+            return _post_context_cache[cache_key]
+
+        # L2: Check Redis cache
         cached = _cache_get(cache_key)
         if cached:
+            logger.debug(f"L2 cache hit for {cache_key}")
+            CACHE_HITS.labels(key_type="post_context_l2").inc()
+            _post_context_cache[cache_key] = cached  # Populate L1
             return cached
+
+        # Cache miss - query DB
+        CACHE_MISSES.labels(key_type="post_context").inc()
 
         try:
             result = _execute_query(
                 supabase.table("instagram_media")
                 .select("caption, like_count, comments_count, media_type, shares_count, reach")
                 .eq("instagram_media_id", post_id)
-                .limit(1)
+                .limit(1),
+                table="instagram_media",
+                operation="select"
             )
 
             if not result.data:
@@ -159,6 +189,8 @@ class SupabaseService:
             reach = data.get("reach", 0) or 0
             data["engagement_rate"] = round((likes + comments) / reach, 4) if reach > 0 else 0.0
 
+            # Write to both cache layers
+            _post_context_cache[cache_key] = data
             _cache_set(cache_key, data, ttl=30)
             return data
 
@@ -178,27 +210,47 @@ class SupabaseService:
 
         Real columns: username, name, account_type, followers_count, biography, category
         (instagram_business_username does NOT exist — use 'username')
+
+        Caching: L1 in-memory (60s TTL) -> L2 Redis (60s TTL) -> Supabase
         """
         if not supabase or not business_account_id:
             return {}
 
         cache_key = f"account:{business_account_id}"
+
+        # L1: Check in-memory cache first (fastest)
+        if cache_key in _account_info_cache:
+            logger.debug(f"L1 cache hit for {cache_key}")
+            CACHE_HITS.labels(key_type="account_info_l1").inc()
+            return _account_info_cache[cache_key]
+
+        # L2: Check Redis cache
         cached = _cache_get(cache_key)
         if cached:
+            logger.debug(f"L2 cache hit for {cache_key}")
+            CACHE_HITS.labels(key_type="account_info_l2").inc()
+            _account_info_cache[cache_key] = cached  # Populate L1
             return cached
+
+        # Cache miss - query DB
+        CACHE_MISSES.labels(key_type="account_info").inc()
 
         try:
             result = _execute_query(
                 supabase.table("instagram_business_accounts")
                 .select("username, name, account_type, followers_count, biography, category")
                 .eq("id", business_account_id)
-                .limit(1)
+                .limit(1),
+                table="instagram_business_accounts",
+                operation="select"
             )
 
             if not result.data:
                 return {}
 
             data = result.data[0]
+            # Write to both cache layers
+            _account_info_cache[cache_key] = data
             _cache_set(cache_key, data, ttl=60)
             return data
 
@@ -228,7 +280,9 @@ class SupabaseService:
                 .select("text, sentiment, category, priority, author_username, created_at")
                 .eq("business_account_id", business_account_id)
                 .order("created_at", desc=True)
-                .limit(limit)
+                .limit(limit),
+                table="instagram_comments",
+                operation="select"
             )
             return result.data or []
 
@@ -263,7 +317,9 @@ class SupabaseService:
                 .select("id, conversation_status, within_window, window_expires_at")
                 .eq("business_account_id", business_account_id)
                 .eq("customer_instagram_id", sender_id)
-                .limit(1)
+                .limit(1),
+                table="instagram_dm_conversations",
+                operation="select"
             )
 
             if not conv_result.data:
@@ -278,7 +334,9 @@ class SupabaseService:
                 .select("message_text, message_type, is_from_business, sent_at, send_status")
                 .eq("conversation_id", conversation_id)
                 .order("sent_at", desc=True)
-                .limit(limit)
+                .limit(limit),
+                table="instagram_dm_messages",
+                operation="select"
             )
 
             # Map to backward-compatible format
@@ -319,7 +377,9 @@ class SupabaseService:
                 .select("within_window, window_expires_at, conversation_status, message_count, last_message_at")
                 .eq("business_account_id", business_account_id)
                 .eq("customer_instagram_id", sender_id)
-                .limit(1)
+                .limit(1),
+                table="instagram_dm_conversations",
+                operation="select"
             )
             return result.data[0] if result.data else {}
 
@@ -348,7 +408,9 @@ class SupabaseService:
                 .select("like_count, comments_count, shares_count, reach")
                 .eq("business_account_id", business_account_id)
                 .order("published_at", desc=True)
-                .limit(limit)
+                .limit(limit),
+                table="instagram_media",
+                operation="select"
             )
 
             if not result.data:
@@ -436,7 +498,11 @@ class SupabaseService:
                 "success": True,
             }
 
-            _execute_query(supabase.table("audit_log").insert(row))
+            _execute_query(
+                supabase.table("audit_log").insert(row),
+                table="audit_log",
+                operation="insert"
+            )
             return True
 
         except CircuitBreakerError:

@@ -4,7 +4,12 @@ Agent Service
 Lightweight LLM+tools layer using llm.bind_tools() (NOT AgentExecutor).
 Single-pass: LLM receives tools -> may call them -> we execute -> return result.
 
-Includes asyncio.Semaphore to limit concurrent Ollama inferences and protect CPU.
+Features:
+  - asyncio.Semaphore to limit concurrent Ollama inferences
+  - ChatOllama with sync invoke() wrapped in asyncio.to_thread()
+  - Parallel tool execution via asyncio.gather()
+  - Per-tool timeout with graceful fallback
+
 Upgrade path: If multi-step reasoning is needed later, swap to AgentExecutor.
 The tools and prompts are already compatible.
 """
@@ -17,10 +22,15 @@ import time
 
 from config import llm, logger
 from tools import SUPABASE_TOOLS
+from prompts import SYSTEM_PROMPT
+from routes.metrics import TOOL_CALLS, LLM_ERRORS
 
 # Configurable max concurrent LLM inferences (protects Ollama CPU)
 MAX_CONCURRENT_LLM = int(os.getenv("MAX_CONCURRENT_LLM", "4"))
 _llm_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM)
+
+# Per-tool timeout in seconds
+TOOL_TIMEOUT_SECONDS = 5.0
 
 
 class AgentService:
@@ -31,44 +41,50 @@ class AgentService:
         self._tool_map = {t.name: t for t in SUPABASE_TOOLS}
         logger.info(
             f"AgentService initialized with {len(SUPABASE_TOOLS)} tools "
-            f"(max_concurrent={MAX_CONCURRENT_LLM}): {list(self._tool_map.keys())}"
+            f"(max_concurrent={MAX_CONCURRENT_LLM}, tool_timeout={TOOL_TIMEOUT_SECONDS}s): "
+            f"{list(self._tool_map.keys())}"
         )
 
     async def analyze_async(self, prompt: str) -> dict:
         """Async entry point with semaphore-limited concurrency.
 
-        Acquires the semaphore before running the blocking LLM call in a thread pool.
+        Uses ChatOllama.invoke() wrapped in asyncio.to_thread().
+        Tools execute in parallel via asyncio.gather().
         At most MAX_CONCURRENT_LLM inferences run simultaneously.
         """
         async with _llm_semaphore:
-            return await asyncio.to_thread(self._analyze_sync, prompt)
+            return await self._analyze(prompt)
 
-    def _analyze_sync(self, prompt: str) -> dict:
-        """Synchronous LLM invocation with single-pass tool execution.
+    async def _analyze(self, prompt: str) -> dict:
+        """Async LLM invocation with parallel tool execution.
 
         Flow:
-          1. Send prompt to LLM with tools bound
-          2. If LLM requests tool calls, execute them
-          3. Parse final response as JSON
+          1. Send prompt to LLM with tools bound (sync invoke in thread)
+          2. If LLM requests tool calls, execute them in parallel
+          3. If tools were called, do follow-up invoke with results
+          4. Parse final response as JSON
 
         Returns dict with parsed result or error info.
         """
         start_time = time.time()
 
         try:
-            # Step 1: Invoke LLM with tools
-            result = self.llm_with_tools.invoke(prompt)
+            # Prepend system prompt for consistent behavior
+            full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+
+            # Step 1: Invoke LLM with tools (sync wrapped in thread)
+            result = await asyncio.to_thread(self.llm_with_tools.invoke, full_prompt)
             tool_calls = getattr(result, "tool_calls", [])
 
-            # Step 2: Execute tool calls if any
+            # Step 2: Execute tool calls in parallel if any
             tool_outputs = {}
             if tool_calls:
-                tool_outputs = self._execute_tool_calls(tool_calls)
+                tool_outputs = await self._execute_tool_calls_async(tool_calls)
 
                 # If tools were called, do a follow-up invoke with tool results as context
                 if tool_outputs:
-                    enriched_prompt = self._build_enriched_prompt(prompt, tool_outputs)
-                    result = self.llm_with_tools.invoke(enriched_prompt)
+                    enriched_prompt = self._build_enriched_prompt(full_prompt, tool_outputs)
+                    result = await asyncio.to_thread(self.llm_with_tools.invoke, enriched_prompt)
 
             latency_ms = int((time.time() - start_time) * 1000)
 
@@ -83,34 +99,64 @@ class AgentService:
         except Exception as e:
             latency_ms = int((time.time() - start_time) * 1000)
             logger.error(f"AgentService analysis failed (latency={latency_ms}ms): {e}")
+            LLM_ERRORS.labels(error_type="agent_execution_failed").inc()
             return {
                 "error": "agent_execution_failed",
                 "message": str(e),
                 "_latency_ms": latency_ms,
             }
 
-    # Keep backward compat alias
-    analyze = _analyze_sync
+    async def _execute_tool_calls_async(self, tool_calls: list) -> dict:
+        """Execute tool calls in parallel with timeout handling.
 
-    def _execute_tool_calls(self, tool_calls: list) -> dict:
-        """Execute tool calls requested by the LLM."""
-        outputs = {}
-        for call in tool_calls:
+        Each tool is wrapped in asyncio.wait_for with TOOL_TIMEOUT_SECONDS.
+        On timeout, returns a fallback error response instead of blocking.
+        """
+        async def execute_single_tool(call) -> tuple[str, dict]:
+            """Execute a single tool with timeout protection."""
             tool_name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
             tool_args = call.get("args", {}) if isinstance(call, dict) else getattr(call, "args", {})
 
             tool = self._tool_map.get(tool_name)
             if not tool:
                 logger.warning(f"LLM requested unknown tool: {tool_name}")
-                continue
+                return tool_name, {"error": "unknown_tool", "message": f"Tool '{tool_name}' not found"}
 
             try:
-                result = tool.invoke(tool_args)
-                outputs[tool_name] = result
+                # Run sync tool in thread pool with timeout
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(tool.invoke, tool_args),
+                    timeout=TOOL_TIMEOUT_SECONDS
+                )
                 logger.info(f"Tool '{tool_name}' executed successfully")
+                TOOL_CALLS.labels(tool_name=tool_name).inc()
+                return tool_name, result
+
+            except asyncio.TimeoutError:
+                logger.warning(f"Tool '{tool_name}' timed out after {TOOL_TIMEOUT_SECONDS}s")
+                TOOL_CALLS.labels(tool_name=f"{tool_name}_timeout").inc()
+                return tool_name, {
+                    "error": "timeout",
+                    "message": f"Tool '{tool_name}' timed out after {TOOL_TIMEOUT_SECONDS}s"
+                }
             except Exception as e:
                 logger.error(f"Tool '{tool_name}' failed: {e}")
-                outputs[tool_name] = {"error": str(e)}
+                TOOL_CALLS.labels(tool_name=f"{tool_name}_error").inc()
+                return tool_name, {"error": str(e)}
+
+        # Execute all tools in parallel
+        tasks = [execute_single_tool(call) for call in tool_calls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Collect results, handling any unexpected exceptions
+        outputs = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Unexpected tool execution error: {result}")
+                continue
+            tool_name, output = result
+            if tool_name:
+                outputs[tool_name] = output
 
         return outputs
 
@@ -155,3 +201,8 @@ class AgentService:
             "error": "json_parse_failed",
             "raw_response": cleaned[:500],
         }
+
+    # Backward compatibility: sync wrapper for tests
+    def analyze(self, prompt: str) -> dict:
+        """Sync wrapper - runs async analyze in new event loop."""
+        return asyncio.run(self.analyze_async(prompt))
