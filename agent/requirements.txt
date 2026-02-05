@@ -1,10 +1,12 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 slowapi>=0.1.9
-langchain==0.3.1
-langchain-ollama==0.3.1
-langchain-core>=0.3.1
-requests==2.32.3
+# Security updates: Upgrade all LangChain packages together for compatibility
+langchain>=0.3.20  # Updated to match langchain-core 0.3.81+ requirements
+langchain-ollama>=0.3.1
+langchain-core>=0.3.81  # CVE-2025-68664 (9.3 CRITICAL) + CVE-2025-65106 (8.3 HIGH)
+langchain-text-splitters>=0.3.9  # CVE-2025-6985 (7.5 HIGH)
+requests>=2.32.4  # CVE-2024-47081 (5.3 MEDIUM)
 supabase==2.8.0
 python-dotenv==1.0.1
 pydantic>=2.0
