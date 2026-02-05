@@ -7,6 +7,9 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# Upgrade pip to fix CVE-2025-8869 (5.9 MEDIUM) + CVE-2026-1703 (2 LOW)
+RUN pip install --upgrade pip>=26.0
+
 # Copy requirements and install Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
