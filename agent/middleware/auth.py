@@ -10,7 +10,15 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 # Paths that skip authentication (opt-in allowlist)
-PUBLIC_PATHS = {"/health", "/metrics", "/docs", "/openapi.json"}
+# Note: Webhook endpoints use HMAC-SHA256 signature verification instead of API key
+PUBLIC_PATHS = {
+    "/health",
+    "/metrics",
+    "/docs",
+    "/openapi.json",
+    "/webhook/comment",  # Verified via X-Hub-Signature-256
+    "/webhook/dm",       # Verified via X-Hub-Signature-256
+}
 
 
 async def api_key_middleware(request: Request, call_next):

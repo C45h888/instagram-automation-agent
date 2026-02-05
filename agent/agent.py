@@ -30,7 +30,16 @@ from middleware import api_key_middleware
 from services.prompt_service import PromptService
 
 # Import route routers
-from routes import health_router, approve_comment_router, approve_dm_router, approve_post_router, metrics_router
+from routes import (
+    health_router,
+    approve_comment_router,
+    approve_dm_router,
+    approve_post_router,
+    metrics_router,
+    webhook_comment_router,
+    webhook_dm_router,
+    log_outcome_router,
+)
 
 
 @asynccontextmanager
@@ -40,8 +49,10 @@ async def lifespan(app: FastAPI):
     logger.info("Oversight Brain Agent starting up")
     logger.info(f"  Ollama Host: {OLLAMA_HOST}")
     logger.info(f"  Model: {OLLAMA_MODEL}")
-    logger.info(f"  Rate Limit: 60/min global, 30/min on /approve/*")
-    logger.info(f"  Endpoints: /health, /metrics, /approve/comment-reply, /approve/dm-reply, /approve/post")
+    logger.info(f"  Rate Limit: 60/min global, 30/min on /approve/*, 10/min on /webhook/*")
+    logger.info(f"  Approval Endpoints: /approve/comment-reply, /approve/dm-reply, /approve/post")
+    logger.info(f"  Webhook Endpoints: /webhook/comment, /webhook/dm, /log-outcome")
+    logger.info(f"  Utility: /health, /metrics")
     logger.info("=" * 60)
     # Load prompts from DB (falls back to static defaults)
     PromptService.load()
@@ -87,6 +98,9 @@ app.include_router(approve_comment_router)
 app.include_router(approve_dm_router)
 app.include_router(approve_post_router)
 app.include_router(metrics_router)
+app.include_router(webhook_comment_router)
+app.include_router(webhook_dm_router)
+app.include_router(log_outcome_router)
 
 
 # ================================

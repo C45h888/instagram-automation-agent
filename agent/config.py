@@ -98,6 +98,25 @@ llm = ChatOllama(
 AGENT_API_KEY = os.getenv("AGENT_API_KEY", "")
 
 # ================================
+# Instagram Webhook Security
+# ================================
+INSTAGRAM_APP_SECRET = os.getenv("INSTAGRAM_APP_SECRET", "")
+INSTAGRAM_VERIFY_TOKEN = os.getenv("INSTAGRAM_VERIFY_TOKEN", "")
+
+# ================================
+# Backend Proxy URLs (for Instagram API calls)
+# ================================
+BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://localhost:3001")
+BACKEND_REPLY_COMMENT_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/reply-comment"
+BACKEND_REPLY_DM_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/reply-dm"
+
+# ================================
+# Timeouts & Resilience
+# ================================
+BACKEND_TIMEOUT_SECONDS = 8.0
+WEBHOOK_RATE_LIMIT = "10/minute"
+
+# ================================
 # Approval Thresholds & Constants
 # ================================
 COMMENT_APPROVAL_THRESHOLD = 0.75
@@ -111,3 +130,13 @@ MAX_HASHTAG_COUNT = 10
 VIP_LIFETIME_VALUE_THRESHOLD = 500.0
 
 ESCALATION_INTENTS = {"complaint", "refund", "return", "legal"}
+
+# ================================
+# Message Classification Constants
+# ================================
+MESSAGE_CATEGORIES = {
+    "sizing", "shipping", "returns", "availability",
+    "order_status", "complaint", "price", "praise", "general"
+}
+ESCALATION_CATEGORIES = {"complaint", "returns", "order_status"}
+URGENT_KEYWORDS = {"urgent", "asap", "emergency", "immediately", "now"}

@@ -211,5 +211,74 @@ Hashtags: ["summercollection", "newdrop", "limitededition", "fashion", "style", 
 {{"approved": true, "modifications": {{"caption": null, "hashtags": null}}, "quality_score": 9.2, "engagement_prediction": 0.058, "reasoning": "Excellent hook that stops the scroll, builds anticipation, clear CTA that drives comments. Hashtags are relevant and not excessive"}}
 
 Respond with ONLY this JSON:
-{{"approved": true, "modifications": {{"caption": "improved caption or null", "hashtags": ["list", "or", "null"]}}, "quality_score": 8.5, "engagement_prediction": 0.045, "reasoning": "brief explanation"}}"""
+{{"approved": true, "modifications": {{"caption": "improved caption or null", "hashtags": ["list", "or", "null"]}}, "quality_score": 8.5, "engagement_prediction": 0.045, "reasoning": "brief explanation"}}""",
+
+    "analyze_message": """You are the customer service brain for an Instagram business account.
+Analyze the incoming message and provide a structured JSON response.
+
+BRAND CONTEXT:
+- Account: @{account_username}
+- Account Type: {account_type}
+- Customer Lifetime Value: ${customer_value}
+
+MESSAGE DETAILS:
+- Type: {message_type}
+- From: @{sender_username}
+- Text: "{message_text}"
+
+ADDITIONAL CONTEXT:
+- Post Caption: "{post_caption}"
+- Post Engagement Rate: {post_engagement}%
+- DM History: {dm_history_summary}
+
+CLASSIFICATION CATEGORIES (pick ONE):
+- sizing: size, fit, measurement, small, medium, large, chart
+- shipping: ship, delivery, arrive, send, track, express
+- returns: return, exchange, refund, change, wrong, defect
+- availability: stock, available, sold out, restock, back in stock
+- order_status: order, status, where, tracking, number, confirmation
+- complaint: bad, terrible, worst, hate, problem, issue, broken, damaged
+- price: price, cost, expensive, cheap, discount, sale, coupon, promo
+- praise: love, amazing, great, beautiful, perfect, awesome, thank, best
+- general: anything that doesn't fit above
+
+PRIORITY RULES:
+- urgent: complaint with negative sentiment, contains "urgent"/"asap"/"emergency"
+- high: returns, order_status, or negative sentiment
+- medium: sizing, shipping, availability inquiries
+- low: price inquiries, praise, general positive
+
+ESCALATION TRIGGERS (needs_human = true):
+- Category is "complaint" with negative sentiment
+- Message length > 200 chars with multiple questions
+- Contains words: urgent, asap, emergency, lawsuit, lawyer
+
+REPLY GUIDELINES:
+- Max 200 chars for comments, 150 for DMs
+- Friendly, professional brand voice
+- 1-2 emoji max
+- Address the specific question
+- Include CTA where appropriate
+- For escalation: acknowledge message, promise follow-up
+
+FEW-SHOT EXAMPLES:
+
+Example 1 - Sizing inquiry (auto-reply):
+Input: "What size should I get? I'm usually a medium"
+{{"category": "sizing", "sentiment": "neutral", "priority": "medium", "intent": "inquiry", "confidence": 0.88, "needs_human": false, "escalation_reason": null, "suggested_reply": "Hi! Our sizing runs true to fit - Medium should work great! Check our size guide in bio for exact measurements.", "keywords_matched": ["size", "medium"]}}
+
+Example 2 - Complaint (escalate):
+Input: "This is terrible! Order arrived damaged and no one is responding. I want a refund NOW"
+{{"category": "complaint", "sentiment": "negative", "priority": "urgent", "intent": "complaint", "confidence": 0.95, "needs_human": true, "escalation_reason": "Negative complaint with refund request", "suggested_reply": "I'm so sorry about this. I've flagged this as urgent - someone will personally reach out within the hour.", "keywords_matched": ["terrible", "damaged", "refund"]}}
+
+Example 3 - Praise (auto-reply):
+Input: "Love my new dress! Best purchase ever!!"
+{{"category": "praise", "sentiment": "positive", "priority": "low", "intent": "praise", "confidence": 0.92, "needs_human": false, "escalation_reason": null, "suggested_reply": "Thank you so much! We're thrilled you love it! Tag us in your photos - we'd love to feature you!", "keywords_matched": ["love", "best"]}}
+
+Example 4 - Order status (auto-reply with info request):
+Input: "When will my order arrive? Order #12345"
+{{"category": "order_status", "sentiment": "neutral", "priority": "high", "intent": "inquiry", "confidence": 0.90, "needs_human": false, "escalation_reason": null, "suggested_reply": "Let me check! Can you confirm the email used for your order? I'll send tracking details right away.", "keywords_matched": ["order", "arrive"]}}
+
+Respond with ONLY valid JSON (no markdown, no explanation):
+{{"category": "string", "sentiment": "positive|neutral|negative", "priority": "urgent|high|medium|low", "intent": "inquiry|complaint|praise|request|other", "confidence": 0.0-1.0, "needs_human": true|false, "escalation_reason": "string or null", "suggested_reply": "string", "keywords_matched": ["list"]}}"""
 }

@@ -111,3 +111,50 @@ class PostApprovalRequest(BaseModel):
     @classmethod
     def validate_account_id(cls, v):
         return _validate_uuid_format(v)
+
+
+# ================================
+# Instagram Webhook Models
+# ================================
+class CommentWebhookData(BaseModel):
+    """Parsed comment from Instagram webhook."""
+    comment_id: str
+    comment_text: str
+    post_id: str
+    commenter_username: str
+    commenter_id: str
+    business_account_id: str
+    timestamp: str
+
+    @field_validator("comment_text", mode="before")
+    @classmethod
+    def sanitize_text(cls, v):
+        return _sanitize_text(v, max_length=2000)
+
+
+class DMWebhookData(BaseModel):
+    """Parsed DM from Instagram webhook."""
+    message_id: str
+    message_text: str
+    sender_username: str
+    sender_id: str
+    business_account_id: str
+    conversation_id: str
+    timestamp: str
+    has_attachments: bool = False
+
+    @field_validator("message_text", mode="before")
+    @classmethod
+    def sanitize_text(cls, v):
+        return _sanitize_text(v, max_length=2000)
+
+
+class ExecutionOutcome(BaseModel):
+    """For /log-outcome feedback endpoint."""
+    resource_type: str  # "comment" or "dm"
+    resource_id: str
+    execution_id: str
+    success: bool
+    instagram_response: Optional[dict] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None

@@ -21,7 +21,7 @@ import re
 import time
 
 from config import llm, logger
-from tools import SUPABASE_TOOLS
+from tools import ALL_TOOLS
 from prompts import SYSTEM_PROMPT
 from routes.metrics import TOOL_CALLS, LLM_ERRORS
 
@@ -34,13 +34,13 @@ TOOL_TIMEOUT_SECONDS = 5.0
 
 
 class AgentService:
-    """Invoke LLM with bound Supabase tools for context-aware analysis."""
+    """Invoke LLM with bound tools for context-aware analysis and automation."""
 
     def __init__(self):
-        self.llm_with_tools = llm.bind_tools(SUPABASE_TOOLS)
-        self._tool_map = {t.name: t for t in SUPABASE_TOOLS}
+        self.llm_with_tools = llm.bind_tools(ALL_TOOLS)
+        self._tool_map = {t.name: t for t in ALL_TOOLS}
         logger.info(
-            f"AgentService initialized with {len(SUPABASE_TOOLS)} tools "
+            f"AgentService initialized with {len(ALL_TOOLS)} tools "
             f"(max_concurrent={MAX_CONCURRENT_LLM}, tool_timeout={TOOL_TIMEOUT_SECONDS}s): "
             f"{list(self._tool_map.keys())}"
         )
