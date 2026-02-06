@@ -16,8 +16,9 @@ PUBLIC_PATHS = {
     "/metrics",
     "/docs",
     "/openapi.json",
-    "/webhook/comment",  # Verified via X-Hub-Signature-256
-    "/webhook/dm",       # Verified via X-Hub-Signature-256
+    "/webhook/comment",            # Verified via X-Hub-Signature-256
+    "/webhook/dm",                 # Verified via X-Hub-Signature-256
+    "/engagement-monitor/status",  # Read-only scheduler status
 }
 
 

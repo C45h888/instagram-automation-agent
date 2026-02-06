@@ -1,17 +1,23 @@
 """
 LangChain Oversight Brain Agent
 ================================
-Central approval authority for Instagram automation N8N workflows.
+Central approval and automation authority for Instagram workflows.
 Receives proposed actions (comment replies, DM replies, posts),
 analyzes them using NVIDIA Nemotron 4 8B via Ollama,
 and returns approve/reject/modify decisions.
 
+Also runs the engagement monitor scheduler for proactive comment scanning.
+
 Endpoints:
-  GET  /health                 - Health check (Ollama + Supabase status)
-  GET  /metrics                - Prometheus metrics
-  POST /approve/comment-reply  - Approve/reject comment reply
-  POST /approve/dm-reply       - Approve/reject DM reply (with escalation)
-  POST /approve/post           - Approve/reject post caption
+  GET  /health                       - Health check (Ollama + Supabase status)
+  GET  /metrics                      - Prometheus metrics
+  POST /approve/comment-reply        - Approve/reject comment reply
+  POST /approve/dm-reply             - Approve/reject DM reply (with escalation)
+  POST /approve/post                 - Approve/reject post caption
+  GET  /engagement-monitor/status    - Scheduler status
+  POST /engagement-monitor/trigger   - Manual trigger
+  POST /engagement-monitor/pause     - Pause scheduler
+  POST /engagement-monitor/resume    - Resume scheduler
 """
 
 import os
@@ -25,9 +31,10 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from config import logger, OLLAMA_HOST, OLLAMA_MODEL
+from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED
 from middleware import api_key_middleware
 from services.prompt_service import PromptService
+from scheduler.scheduler_service import SchedulerService
 
 # Import route routers
 from routes import (
@@ -39,6 +46,7 @@ from routes import (
     webhook_comment_router,
     webhook_dm_router,
     log_outcome_router,
+    engagement_monitor_router,
 )
 
 
@@ -52,12 +60,17 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Rate Limit: 60/min global, 30/min on /approve/*, 10/min on /webhook/*")
     logger.info(f"  Approval Endpoints: /approve/comment-reply, /approve/dm-reply, /approve/post")
     logger.info(f"  Webhook Endpoints: /webhook/comment, /webhook/dm, /log-outcome")
+    logger.info(f"  Scheduler: /engagement-monitor/status, /trigger, /pause, /resume")
     logger.info(f"  Utility: /health, /metrics")
     logger.info("=" * 60)
     # Load prompts from DB (falls back to static defaults)
     PromptService.load()
+    # Start the engagement monitor scheduler
+    SchedulerService.init()
+    logger.info(f"  Engagement Monitor: {'enabled' if ENGAGEMENT_MONITOR_ENABLED else 'disabled'}")
     yield
-    # Shutdown cleanup (if needed in future)
+    # Shutdown cleanup
+    SchedulerService.shutdown()
 
 
 app = FastAPI(
@@ -101,6 +114,7 @@ app.include_router(metrics_router)
 app.include_router(webhook_comment_router)
 app.include_router(webhook_dm_router)
 app.include_router(log_outcome_router)
+app.include_router(engagement_monitor_router)
 
 
 # ================================

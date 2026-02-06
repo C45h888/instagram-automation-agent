@@ -48,7 +48,9 @@ def validate_schema():
     required = {
         "instagram_media": ["caption", "like_count", "comments_count", "reach", "published_at"],
         "instagram_business_accounts": ["username", "name", "account_type", "followers_count"],
-        "instagram_comments": ["text", "sentiment", "business_account_id", "created_at"],
+        "instagram_comments": ["text", "sentiment", "business_account_id", "created_at",
+                                "processed_by_automation", "automated_response_sent",
+                                "response_text", "media_id", "instagram_comment_id"],
         "instagram_dm_conversations": ["customer_instagram_id", "business_account_id", "within_window"],
         "instagram_dm_messages": ["message_text", "conversation_id", "is_from_business", "sent_at"],
         "audit_log": ["event_type", "action", "details", "resource_type"],
@@ -140,3 +142,14 @@ MESSAGE_CATEGORIES = {
 }
 ESCALATION_CATEGORIES = {"complaint", "returns", "order_status"}
 URGENT_KEYWORDS = {"urgent", "asap", "emergency", "immediately", "now"}
+
+# ================================
+# Engagement Monitor (Scheduler)
+# ================================
+ENGAGEMENT_MONITOR_ENABLED = os.getenv("ENGAGEMENT_MONITOR_ENABLED", "true").lower() == "true"
+ENGAGEMENT_MONITOR_INTERVAL_MINUTES = int(os.getenv("ENGAGEMENT_MONITOR_INTERVAL_MINUTES", "5"))
+ENGAGEMENT_MONITOR_MAX_COMMENTS_PER_RUN = int(os.getenv("ENGAGEMENT_MONITOR_MAX_COMMENTS_PER_RUN", "50"))
+ENGAGEMENT_MONITOR_MAX_CONCURRENT_ANALYSES = int(os.getenv("ENGAGEMENT_MONITOR_MAX_CONCURRENT_ANALYSES", "3"))
+ENGAGEMENT_MONITOR_HOURS_BACK = int(os.getenv("ENGAGEMENT_MONITOR_HOURS_BACK", "24"))
+ENGAGEMENT_MONITOR_AUTO_REPLY_ENABLED = os.getenv("ENGAGEMENT_MONITOR_AUTO_REPLY_ENABLED", "true").lower() == "true"
+ENGAGEMENT_MONITOR_CONFIDENCE_THRESHOLD = float(os.getenv("ENGAGEMENT_MONITOR_CONFIDENCE_THRESHOLD", "0.75"))

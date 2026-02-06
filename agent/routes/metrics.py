@@ -57,6 +57,21 @@ LLM_ERRORS = Counter(
 )
 
 # ================================
+# Engagement Monitor Metrics
+# ================================
+ENGAGEMENT_MONITOR_RUNS = Counter(
+    "agent_engagement_monitor_runs_total",
+    "Engagement monitor cycles completed",
+    ["status"],  # success, error, partial, no_accounts
+)
+
+ENGAGEMENT_MONITOR_COMMENTS = Counter(
+    "agent_engagement_monitor_comments_total",
+    "Comments processed by engagement monitor",
+    ["action"],  # replied, escalated, skipped, error
+)
+
+# ================================
 # Histograms
 # ================================
 REQUEST_LATENCY = Histogram(
@@ -64,6 +79,12 @@ REQUEST_LATENCY = Histogram(
     "Request latency in seconds",
     ["endpoint"],
     buckets=[0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0],
+)
+
+ENGAGEMENT_MONITOR_DURATION = Histogram(
+    "agent_engagement_monitor_duration_seconds",
+    "Duration of engagement monitor cycle",
+    buckets=[5.0, 15.0, 30.0, 60.0, 120.0, 300.0],
 )
 
 

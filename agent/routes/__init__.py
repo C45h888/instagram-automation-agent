@@ -6,3 +6,4 @@ from .metrics import metrics_router
 from .webhook_comment import webhook_comment_router
 from .webhook_dm import webhook_dm_router
 from .log_outcome import log_outcome_router
+from .engagement_monitor_routes import engagement_monitor_router

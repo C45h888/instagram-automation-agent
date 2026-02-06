@@ -16,3 +16,5 @@ pybreaker==1.0.1
 bleach==6.1.0
 prometheus-client==0.20.0
 cachetools>=5.5.0
+apscheduler>=3.10.4
+httpx>=0.27.0

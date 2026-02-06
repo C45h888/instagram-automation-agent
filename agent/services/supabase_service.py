@@ -14,7 +14,7 @@ Features:
 import os
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import redis
 from cachetools import TTLCache
@@ -445,6 +445,187 @@ class SupabaseService:
         except Exception as e:
             logger.warning(f"Failed to fetch post performance: {e}")
             return {"avg_likes": 0, "avg_comments": 0, "avg_engagement_rate": 0}
+
+    # --------------------------------------------------
+    # READ: Active Business Accounts (Engagement Monitor)
+    # --------------------------------------------------
+    @staticmethod
+    def get_active_business_accounts() -> list:
+        """Fetch all active connected business accounts.
+
+        Used by engagement monitor to iterate over all accounts.
+        Returns list of dicts with id, username, name, instagram_business_id, account_type.
+        """
+        if not supabase:
+            return []
+
+        try:
+            result = _execute_query(
+                supabase.table("instagram_business_accounts")
+                .select("id, username, name, instagram_business_id, account_type, followers_count")
+                .eq("is_connected", True)
+                .eq("connection_status", "active"),
+                table="instagram_business_accounts",
+                operation="select"
+            )
+            return result.data or []
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping active accounts fetch")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to fetch active business accounts: {e}")
+            return []
+
+    # --------------------------------------------------
+    # READ: Unprocessed Comments (Engagement Monitor)
+    # --------------------------------------------------
+    @staticmethod
+    def get_unprocessed_comments(business_account_id: str, limit: int = 50, hours_back: int = 24) -> list:
+        """Fetch comments not yet processed by the engagement monitor.
+
+        Filters:
+          - business_account_id matches
+          - processed_by_automation = false
+          - created_at > now - hours_back
+          - parent_comment_id IS NULL (skip replies-to-replies)
+
+        Returns oldest-first (FIFO) for fair processing.
+        """
+        if not supabase or not business_account_id:
+            return []
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours_back)).isoformat()
+
+        try:
+            result = _execute_query(
+                supabase.table("instagram_comments")
+                .select("id, instagram_comment_id, text, author_username, "
+                        "author_instagram_id, media_id, sentiment, category, "
+                        "priority, like_count, created_at")
+                .eq("business_account_id", business_account_id)
+                .eq("processed_by_automation", False)
+                .is_("parent_comment_id", "null")
+                .gte("created_at", cutoff)
+                .order("created_at", desc=False)
+                .limit(limit),
+                table="instagram_comments",
+                operation="select"
+            )
+            return result.data or []
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping unprocessed comments fetch")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to fetch unprocessed comments for {business_account_id}: {e}")
+            return []
+
+    # --------------------------------------------------
+    # WRITE: Mark Comment Processed (Engagement Monitor)
+    # --------------------------------------------------
+    @staticmethod
+    def mark_comment_processed(
+        comment_id: str,
+        response_text: str = None,
+        was_replied: bool = False,
+    ) -> bool:
+        """Update instagram_comments to mark as processed by automation.
+
+        Sets processed_by_automation = true.
+        If replied, also sets automated_response_sent, response_text, response_sent_at.
+        """
+        if not supabase or not comment_id:
+            return False
+
+        update_data = {"processed_by_automation": True}
+        if was_replied and response_text:
+            update_data["automated_response_sent"] = True
+            update_data["response_text"] = response_text
+            update_data["response_sent_at"] = datetime.now(timezone.utc).isoformat()
+
+        try:
+            _execute_query(
+                supabase.table("instagram_comments")
+                .update(update_data)
+                .eq("id", comment_id),
+                table="instagram_comments",
+                operation="update"
+            )
+            return True
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to mark comment processed")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to mark comment {comment_id} as processed: {e}")
+            return False
+
+    # --------------------------------------------------
+    # READ: Post Context by UUID (Engagement Monitor)
+    # --------------------------------------------------
+    @staticmethod
+    def get_post_context_by_uuid(media_uuid: str) -> dict:
+        """Fetch post context using Supabase UUID (not Instagram media ID).
+
+        The instagram_comments table has media_id (FK to instagram_media.id),
+        which is the Supabase UUID. Existing get_post_context queries by
+        instagram_media_id. This method queries by id (UUID) instead.
+
+        Caching: L1 in-memory (30s TTL) -> L2 Redis (30s TTL) -> Supabase
+        """
+        if not supabase or not media_uuid:
+            return {}
+
+        cache_key = f"post_ctx_uuid:{media_uuid}"
+
+        # L1: Check in-memory cache
+        if cache_key in _post_context_cache:
+            CACHE_HITS.labels(key_type="post_context_uuid_l1").inc()
+            return _post_context_cache[cache_key]
+
+        # L2: Check Redis cache
+        cached = _cache_get(cache_key)
+        if cached:
+            CACHE_HITS.labels(key_type="post_context_uuid_l2").inc()
+            _post_context_cache[cache_key] = cached
+            return cached
+
+        CACHE_MISSES.labels(key_type="post_context_uuid").inc()
+
+        try:
+            result = _execute_query(
+                supabase.table("instagram_media")
+                .select("instagram_media_id, caption, like_count, comments_count, "
+                        "media_type, shares_count, reach")
+                .eq("id", media_uuid)
+                .limit(1),
+                table="instagram_media",
+                operation="select"
+            )
+
+            if not result.data:
+                return {}
+
+            data = result.data[0]
+
+            # Compute engagement_rate (column does not exist in DB)
+            likes = data.get("like_count", 0) or 0
+            comments = data.get("comments_count", 0) or 0
+            reach = data.get("reach", 0) or 0
+            data["engagement_rate"] = round((likes + comments) / reach, 4) if reach > 0 else 0.0
+
+            # Write to both cache layers
+            _post_context_cache[cache_key] = data
+            _cache_set(cache_key, data, ttl=30)
+            return data
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping post context (UUID) fetch")
+            return {}
+        except Exception as e:
+            logger.warning(f"Failed to fetch post context for UUID {media_uuid}: {e}")
+            return {}
 
     # --------------------------------------------------
     # WRITE: Audit Log
