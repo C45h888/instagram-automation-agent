@@ -6,7 +6,7 @@ Receives proposed actions (comment replies, DM replies, posts),
 analyzes them using NVIDIA Nemotron 4 8B via Ollama,
 and returns approve/reject/modify decisions.
 
-Also runs the engagement monitor scheduler for proactive comment scanning.
+Also runs the engagement monitor and content scheduler for proactive automation.
 
 Endpoints:
   GET  /health                       - Health check (Ollama + Supabase status)
@@ -14,10 +14,14 @@ Endpoints:
   POST /approve/comment-reply        - Approve/reject comment reply
   POST /approve/dm-reply             - Approve/reject DM reply (with escalation)
   POST /approve/post                 - Approve/reject post caption
-  GET  /engagement-monitor/status    - Scheduler status
+  GET  /engagement-monitor/status    - Engagement monitor status
   POST /engagement-monitor/trigger   - Manual trigger
-  POST /engagement-monitor/pause     - Pause scheduler
-  POST /engagement-monitor/resume    - Resume scheduler
+  POST /engagement-monitor/pause     - Pause engagement monitor
+  POST /engagement-monitor/resume    - Resume engagement monitor
+  GET  /content-scheduler/status     - Content scheduler status
+  POST /content-scheduler/trigger    - Manual trigger
+  POST /content-scheduler/pause      - Pause content scheduler
+  POST /content-scheduler/resume     - Resume content scheduler
 """
 
 import os
@@ -31,7 +35,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED
+from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED
 from middleware import api_key_middleware
 from services.prompt_service import PromptService
 from scheduler.scheduler_service import SchedulerService
@@ -47,6 +51,7 @@ from routes import (
     webhook_dm_router,
     log_outcome_router,
     engagement_monitor_router,
+    content_scheduler_router,
 )
 
 
@@ -60,14 +65,15 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Rate Limit: 60/min global, 30/min on /approve/*, 10/min on /webhook/*")
     logger.info(f"  Approval Endpoints: /approve/comment-reply, /approve/dm-reply, /approve/post")
     logger.info(f"  Webhook Endpoints: /webhook/comment, /webhook/dm, /log-outcome")
-    logger.info(f"  Scheduler: /engagement-monitor/status, /trigger, /pause, /resume")
+    logger.info(f"  Scheduler: /engagement-monitor/*, /content-scheduler/*")
     logger.info(f"  Utility: /health, /metrics")
     logger.info("=" * 60)
     # Load prompts from DB (falls back to static defaults)
     PromptService.load()
-    # Start the engagement monitor scheduler
+    # Start schedulers (engagement monitor + content scheduler)
     SchedulerService.init()
     logger.info(f"  Engagement Monitor: {'enabled' if ENGAGEMENT_MONITOR_ENABLED else 'disabled'}")
+    logger.info(f"  Content Scheduler: {'enabled' if CONTENT_SCHEDULER_ENABLED else 'disabled'}")
     yield
     # Shutdown cleanup
     SchedulerService.shutdown()
@@ -115,6 +121,7 @@ app.include_router(webhook_comment_router)
 app.include_router(webhook_dm_router)
 app.include_router(log_outcome_router)
 app.include_router(engagement_monitor_router)
+app.include_router(content_scheduler_router)
 
 
 # ================================

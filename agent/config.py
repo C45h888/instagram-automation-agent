@@ -68,6 +68,8 @@ def validate_schema():
     # Optional tables (warn instead of crash if missing)
     optional_tables = {
         "prompt_templates": ["prompt_key", "template", "version", "is_active"],
+        "instagram_assets": ["business_account_id", "storage_path", "tags", "last_posted", "is_active"],
+        "scheduled_posts": ["business_account_id", "status", "generated_caption", "agent_quality_score", "run_id"],
     }
     for table, columns in optional_tables.items():
         try:
@@ -153,3 +155,16 @@ ENGAGEMENT_MONITOR_MAX_CONCURRENT_ANALYSES = int(os.getenv("ENGAGEMENT_MONITOR_M
 ENGAGEMENT_MONITOR_HOURS_BACK = int(os.getenv("ENGAGEMENT_MONITOR_HOURS_BACK", "24"))
 ENGAGEMENT_MONITOR_AUTO_REPLY_ENABLED = os.getenv("ENGAGEMENT_MONITOR_AUTO_REPLY_ENABLED", "true").lower() == "true"
 ENGAGEMENT_MONITOR_CONFIDENCE_THRESHOLD = float(os.getenv("ENGAGEMENT_MONITOR_CONFIDENCE_THRESHOLD", "0.75"))
+
+# ================================
+# Content Scheduler
+# ================================
+CONTENT_SCHEDULER_ENABLED = os.getenv("CONTENT_SCHEDULER_ENABLED", "true").lower() == "true"
+CONTENT_SCHEDULER_TIMES = os.getenv("CONTENT_SCHEDULER_TIMES", "09:00,14:00,19:00").split(",")
+CONTENT_SCHEDULER_MAX_CONCURRENT_GENERATIONS = int(os.getenv("CONTENT_SCHEDULER_MAX_CONCURRENT_GENERATIONS", "2"))
+CONTENT_SCHEDULER_MAX_POSTS_PER_DAY = int(os.getenv("CONTENT_SCHEDULER_MAX_POSTS_PER_DAY", "1"))
+CONTENT_SCHEDULER_AUTO_PUBLISH = os.getenv("CONTENT_SCHEDULER_AUTO_PUBLISH", "false").lower() == "true"
+CONTENT_SCHEDULER_MAX_ASSETS_TO_SCORE = int(os.getenv("CONTENT_SCHEDULER_MAX_ASSETS_TO_SCORE", "50"))
+
+# Backend publish endpoint
+BACKEND_PUBLISH_POST_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/publish-post"

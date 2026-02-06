@@ -87,6 +87,27 @@ ENGAGEMENT_MONITOR_DURATION = Histogram(
     buckets=[5.0, 15.0, 30.0, 60.0, 120.0, 300.0],
 )
 
+# ================================
+# Content Scheduler Metrics
+# ================================
+CONTENT_SCHEDULER_RUNS = Counter(
+    "agent_content_scheduler_runs_total",
+    "Content scheduler cycles completed",
+    ["status"],  # success, error, partial, no_accounts
+)
+
+CONTENT_SCHEDULER_POSTS = Counter(
+    "agent_content_scheduler_posts_total",
+    "Posts processed by content scheduler",
+    ["action"],  # approved, rejected, published, failed, no_assets, error
+)
+
+CONTENT_SCHEDULER_DURATION = Histogram(
+    "agent_content_scheduler_duration_seconds",
+    "Duration of content scheduler cycle",
+    buckets=[5.0, 15.0, 30.0, 60.0, 120.0, 300.0],
+)
+
 
 @metrics_router.get("/metrics")
 async def metrics():

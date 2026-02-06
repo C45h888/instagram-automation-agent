@@ -19,6 +19,7 @@ PUBLIC_PATHS = {
     "/webhook/comment",            # Verified via X-Hub-Signature-256
     "/webhook/dm",                 # Verified via X-Hub-Signature-256
     "/engagement-monitor/status",  # Read-only scheduler status
+    "/content-scheduler/status",   # Read-only scheduler status
 }
 
 

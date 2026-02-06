@@ -280,5 +280,60 @@ Input: "When will my order arrive? Order #12345"
 {{"category": "order_status", "sentiment": "neutral", "priority": "high", "intent": "inquiry", "confidence": 0.90, "needs_human": false, "escalation_reason": null, "suggested_reply": "Let me check! Can you confirm the email used for your order? I'll send tracking details right away.", "keywords_matched": ["order", "arrive"]}}
 
 Respond with ONLY valid JSON (no markdown, no explanation):
-{{"category": "string", "sentiment": "positive|neutral|negative", "priority": "urgent|high|medium|low", "intent": "inquiry|complaint|praise|request|other", "confidence": 0.0-1.0, "needs_human": true|false, "escalation_reason": "string or null", "suggested_reply": "string", "keywords_matched": ["list"]}}"""
+{{"category": "string", "sentiment": "positive|neutral|negative", "priority": "urgent|high|medium|low", "intent": "inquiry|complaint|praise|request|other", "confidence": 0.0-1.0, "needs_human": true|false, "escalation_reason": "string or null", "suggested_reply": "string", "keywords_matched": ["list"]}}""",
+
+    "generate_and_evaluate_caption": """You are an Instagram content strategist and quality reviewer for a brand account.
+
+TASK: Generate a high-quality Instagram caption for the asset below, then evaluate your own work.
+
+BRAND CONTEXT:
+- Account: @{account_username}
+- Account Type: {account_type}
+- Followers: {followers_count}
+
+ASSET TO POST:
+- Title: {asset_title}
+- Description: {asset_description}
+- Tags: {asset_tags}
+- Media Type: {media_type}
+
+PERFORMANCE BENCHMARKS (last 10 posts):
+- Avg Likes: {avg_likes}
+- Avg Comments: {avg_comments}
+- Avg Engagement Rate: {avg_engagement_rate}
+
+CURRENT CONTEXT:
+- Time: {hour}:00 on {day_of_week}
+- Selection Score: {selection_score}/100
+
+CAPTION REQUIREMENTS:
+1. Hook (1-2 lines): Stop the scroll, create curiosity
+2. Body (2-4 lines): Value, story, or connection
+3. CTA (1 line): Specific action (comment, save, click link, tag a friend)
+4. Hashtags: 5-8 relevant tags, mix of broad + niche
+
+SELF-EVALUATION CRITERIA (score each 0-10, then compute weighted average):
+- Caption Quality (30%): Strong hook? Clear structure? Compelling CTA?
+- Brand Alignment (25%): Matches brand voice, audience, values?
+- Hashtag Strategy (20%): Relevant, not spammy, good reach mix?
+- Engagement Potential (15%): Will it drive likes, comments, saves?
+- Compliance (10%): Under 2200 chars? 5-8 hashtags? No prohibited content?
+
+HARD RULES (if any fail, you MUST set approved=false):
+- More than 10 hashtags → reject
+- Caption longer than 2200 characters → reject
+- No CTA detected → flag in reasoning (don't auto-reject)
+
+FEW-SHOT EXAMPLES:
+
+Example 1 (strong caption, approved):
+Asset: Summer dress collection, tags: ["fashion", "summer", "dress"]
+{{"hook": "Your summer wardrobe called — it needs an upgrade 👗", "body": "Our new collection just dropped and every piece is designed to turn heads while keeping you cool.\\n\\nFrom beach to brunch, these versatile pieces go anywhere.", "cta": "Double tap if you're ready for summer! Shop link in bio 👆", "hashtags": ["summerfashion", "newcollection", "ootd", "summerstyle", "fashioninspo", "dressup"], "quality_score": 8.4, "approved": true, "modifications": null, "reasoning": "Strong scroll-stopping hook, clear value prop, specific CTA. Hashtags are relevant mix."}}
+
+Example 2 (weak caption, rejected):
+Asset: Office workspace, tags: ["productivity", "work"]
+{{"hook": "Another day at the office", "body": "Working hard today.", "cta": "", "hashtags": ["work", "office", "monday", "grind", "hustle", "boss", "entrepreneur", "motivation", "success", "blessed", "lifestyle"], "quality_score": 3.2, "approved": false, "modifications": null, "reasoning": "No compelling hook, generic body with no value, missing CTA entirely, 11 hashtags exceeds limit. Caption needs complete rewrite."}}
+
+Respond with ONLY valid JSON:
+{{"hook": "...", "body": "...", "cta": "...", "hashtags": ["tag1", "tag2", ...], "quality_score": 0.0, "approved": true, "modifications": {{"caption": "improved full caption or null", "hashtags": ["improved", "tags", "or", "null"]}}, "reasoning": "brief explanation"}}""",
 }
