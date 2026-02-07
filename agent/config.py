@@ -70,6 +70,9 @@ def validate_schema():
         "prompt_templates": ["prompt_key", "template", "version", "is_active"],
         "instagram_assets": ["business_account_id", "storage_path", "tags", "last_posted", "is_active"],
         "scheduled_posts": ["business_account_id", "status", "generated_caption", "agent_quality_score", "run_id"],
+        "sales_attributions": ["order_id", "order_value", "attribution_score", "auto_approved", "business_account_id"],
+        "attribution_review_queue": ["order_id", "review_status", "business_account_id"],
+        "attribution_models": ["weights", "business_account_id"],
     }
     for table, columns in optional_tables.items():
         try:
@@ -168,3 +171,22 @@ CONTENT_SCHEDULER_MAX_ASSETS_TO_SCORE = int(os.getenv("CONTENT_SCHEDULER_MAX_ASS
 
 # Backend publish endpoint
 BACKEND_PUBLISH_POST_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/publish-post"
+
+# ================================
+# Sales Attribution
+# ================================
+SALES_ATTRIBUTION_ENABLED = os.getenv("SALES_ATTRIBUTION_ENABLED", "true").lower() == "true"
+SALES_ATTRIBUTION_AUTO_APPROVE_THRESHOLD = float(os.getenv("SALES_ATTRIBUTION_AUTO_APPROVE_THRESHOLD", "0.65"))
+SALES_ATTRIBUTION_FRAUD_SCORE_THRESHOLD = float(os.getenv("SALES_ATTRIBUTION_FRAUD_SCORE_THRESHOLD", "0.40"))
+SALES_ATTRIBUTION_MAX_TOUCHPOINTS = int(os.getenv("SALES_ATTRIBUTION_MAX_TOUCHPOINTS", "30"))
+SALES_ATTRIBUTION_LOOKBACK_DAYS = int(os.getenv("SALES_ATTRIBUTION_LOOKBACK_DAYS", "30"))
+SALES_ATTRIBUTION_HISTORY_DAYS = int(os.getenv("SALES_ATTRIBUTION_HISTORY_DAYS", "90"))
+SALES_ATTRIBUTION_VERSION = os.getenv("SALES_ATTRIBUTION_VERSION", "v1_agentic")
+ORDER_WEBHOOK_SECRET = os.getenv("ORDER_WEBHOOK_SECRET", "")
+
+# ================================
+# Weekly Learning (Sales Attribution)
+# ================================
+WEEKLY_LEARNING_ENABLED = os.getenv("WEEKLY_LEARNING_ENABLED", "true").lower() == "true"
+WEEKLY_LEARNING_DAY = os.getenv("WEEKLY_LEARNING_DAY", "mon")
+WEEKLY_LEARNING_HOUR = int(os.getenv("WEEKLY_LEARNING_HOUR", "8"))

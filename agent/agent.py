@@ -6,7 +6,8 @@ Receives proposed actions (comment replies, DM replies, posts),
 analyzes them using NVIDIA Nemotron 4 8B via Ollama,
 and returns approve/reject/modify decisions.
 
-Also runs the engagement monitor and content scheduler for proactive automation.
+Also runs the engagement monitor, content scheduler, and weekly attribution
+learning for proactive automation.
 
 Endpoints:
   GET  /health                       - Health check (Ollama + Supabase status)
@@ -22,6 +23,11 @@ Endpoints:
   POST /content-scheduler/trigger    - Manual trigger
   POST /content-scheduler/pause      - Pause content scheduler
   POST /content-scheduler/resume     - Resume content scheduler
+  POST /webhook/order-created        - Sales attribution webhook
+  GET  /sales-attribution/status     - Weekly learning status
+  POST /sales-attribution/trigger    - Manual trigger learning
+  POST /sales-attribution/pause      - Pause weekly learning
+  POST /sales-attribution/resume     - Resume weekly learning
 """
 
 import os
@@ -35,7 +41,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED
+from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED
 from middleware import api_key_middleware
 from services.prompt_service import PromptService
 from scheduler.scheduler_service import SchedulerService
@@ -52,6 +58,8 @@ from routes import (
     log_outcome_router,
     engagement_monitor_router,
     content_scheduler_router,
+    webhook_order_router,
+    attribution_router,
 )
 
 
@@ -64,8 +72,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Model: {OLLAMA_MODEL}")
     logger.info(f"  Rate Limit: 60/min global, 30/min on /approve/*, 10/min on /webhook/*")
     logger.info(f"  Approval Endpoints: /approve/comment-reply, /approve/dm-reply, /approve/post")
-    logger.info(f"  Webhook Endpoints: /webhook/comment, /webhook/dm, /log-outcome")
-    logger.info(f"  Scheduler: /engagement-monitor/*, /content-scheduler/*")
+    logger.info(f"  Webhook Endpoints: /webhook/comment, /webhook/dm, /webhook/order-created, /log-outcome")
+    logger.info(f"  Scheduler: /engagement-monitor/*, /content-scheduler/*, /sales-attribution/*")
     logger.info(f"  Utility: /health, /metrics")
     logger.info("=" * 60)
     # Load prompts from DB (falls back to static defaults)
@@ -74,6 +82,8 @@ async def lifespan(app: FastAPI):
     SchedulerService.init()
     logger.info(f"  Engagement Monitor: {'enabled' if ENGAGEMENT_MONITOR_ENABLED else 'disabled'}")
     logger.info(f"  Content Scheduler: {'enabled' if CONTENT_SCHEDULER_ENABLED else 'disabled'}")
+    logger.info(f"  Sales Attribution: {'enabled' if SALES_ATTRIBUTION_ENABLED else 'disabled'}")
+    logger.info(f"  Weekly Learning: {'enabled' if WEEKLY_LEARNING_ENABLED else 'disabled'}")
     yield
     # Shutdown cleanup
     SchedulerService.shutdown()
@@ -122,6 +132,8 @@ app.include_router(webhook_dm_router)
 app.include_router(log_outcome_router)
 app.include_router(engagement_monitor_router)
 app.include_router(content_scheduler_router)
+app.include_router(webhook_order_router)
+app.include_router(attribution_router)
 
 
 # ================================

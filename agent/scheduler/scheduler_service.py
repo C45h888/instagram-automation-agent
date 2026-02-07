@@ -1,7 +1,7 @@
 """
 Scheduler Service
 ==================
-APScheduler wrapper for the engagement monitor and content scheduler.
+APScheduler wrapper for the engagement monitor, content scheduler, and weekly attribution learning.
 
 Features:
   - AsyncIOScheduler for non-blocking execution
@@ -23,9 +23,14 @@ from config import (
     ENGAGEMENT_MONITOR_INTERVAL_MINUTES,
     CONTENT_SCHEDULER_ENABLED,
     CONTENT_SCHEDULER_TIMES,
+    SALES_ATTRIBUTION_ENABLED,
+    WEEKLY_LEARNING_ENABLED,
+    WEEKLY_LEARNING_DAY,
+    WEEKLY_LEARNING_HOUR,
 )
 from scheduler.engagement_monitor import engagement_monitor_run
 from scheduler.content_scheduler import content_scheduler_run
+from scheduler.weekly_attribution_learning import weekly_attribution_learning_run
 
 
 class SchedulerService:
@@ -92,6 +97,23 @@ class SchedulerService:
         else:
             logger.info("Content Scheduler disabled (CONTENT_SCHEDULER_ENABLED=false)")
 
+        # --- Weekly Attribution Learning (cron-based) ---
+        if SALES_ATTRIBUTION_ENABLED and WEEKLY_LEARNING_ENABLED:
+            cls._scheduler.add_job(
+                cls._make_tracked_runner("weekly_learning", weekly_attribution_learning_run),
+                "cron",
+                day_of_week=WEEKLY_LEARNING_DAY,
+                hour=WEEKLY_LEARNING_HOUR,
+                id="weekly_learning",
+                name="Weekly Attribution Learning",
+            )
+            cls._job_stats["weekly_learning"] = {"last_run_time": None, "total_runs": 0}
+            logger.info(
+                f"Weekly Attribution Learning scheduled ({WEEKLY_LEARNING_DAY} at {WEEKLY_LEARNING_HOUR:02d}:00)"
+            )
+        else:
+            logger.info("Weekly Attribution Learning disabled (SALES_ATTRIBUTION_ENABLED or WEEKLY_LEARNING_ENABLED=false)")
+
         cls._scheduler.start()
         logger.info("Scheduler started")
 
@@ -154,6 +176,14 @@ class SchedulerService:
             "last_run": cs_stats["last_run_time"].isoformat() if cs_stats["last_run_time"] else None,
             "total_runs": cs_stats["total_runs"],
         }
+
+        # Weekly attribution learning (single cron job)
+        wl_enabled = SALES_ATTRIBUTION_ENABLED and WEEKLY_LEARNING_ENABLED
+        result["weekly_learning"] = cls._get_job_status(
+            "weekly_learning",
+            wl_enabled,
+            {"day_of_week": WEEKLY_LEARNING_DAY, "hour": WEEKLY_LEARNING_HOUR},
+        )
 
         return result
 
@@ -219,6 +249,7 @@ class SchedulerService:
         runners = {
             "engagement_monitor": engagement_monitor_run,
             "content_scheduler": content_scheduler_run,
+            "weekly_learning": weekly_attribution_learning_run,
         }
         func = runners.get(job_prefix)
         if not func:

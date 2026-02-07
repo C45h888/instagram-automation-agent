@@ -20,6 +20,8 @@ PUBLIC_PATHS = {
     "/webhook/dm",                 # Verified via X-Hub-Signature-256
     "/engagement-monitor/status",  # Read-only scheduler status
     "/content-scheduler/status",   # Read-only scheduler status
+    "/webhook/order-created",      # Verified via X-Hub-Signature-256
+    "/sales-attribution/status",   # Read-only scheduler status
 }
 
 

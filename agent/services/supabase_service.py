@@ -32,6 +32,7 @@ from routes.metrics import DB_QUERY_COUNT, CACHE_HITS, CACHE_MISSES
 # TTLs match Redis TTLs so expiration is consistent
 _post_context_cache: TTLCache = TTLCache(maxsize=100, ttl=30)
 _account_info_cache: TTLCache = TTLCache(maxsize=50, ttl=60)
+_attribution_model_cache: TTLCache = TTLCache(maxsize=20, ttl=300)  # 5 min for model weights
 
 
 # ================================
@@ -893,6 +894,288 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Failed to update asset {asset_id} after post: {e}")
             return False
+
+    # --------------------------------------------------
+    # READ: Order Attribution (Sales Attribution - dedup)
+    # --------------------------------------------------
+    @staticmethod
+    def get_order_attribution(order_id: str) -> dict:
+        """Check if an order has already been attributed (dedup).
+
+        Returns the existing attribution row or empty dict.
+        """
+        if not supabase or not order_id:
+            return {}
+
+        try:
+            result = _execute_query(
+                supabase.table("sales_attributions")
+                .select("id, order_id")
+                .eq("order_id", order_id)
+                .limit(1),
+                table="sales_attributions",
+                operation="select"
+            )
+            return result.data[0] if result.data else {}
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping order attribution check")
+            return {}
+        except Exception as e:
+            logger.warning(f"Failed to check order attribution for {order_id}: {e}")
+            return {}
+
+    # --------------------------------------------------
+    # READ: Customer Enrichment (Sales Attribution)
+    # --------------------------------------------------
+    @staticmethod
+    def get_customer_enrichment(
+        email: str,
+        business_account_id: str,
+        history_days: int = 90,
+        engagement_days: int = 30,
+    ) -> dict:
+        """Fetch customer history + recent engagements in one call.
+
+        Combines two queries internally but exposes a single method
+        to simplify the webhook pipeline.
+
+        Returns: {"history": {...}, "engagements": [...]}
+        """
+        if not supabase or not email:
+            return {"history": {}, "engagements": []}
+
+        history = {}
+        engagements = []
+
+        # Query 1: Customer Instagram history
+        history_cutoff = (datetime.now(timezone.utc) - timedelta(days=history_days)).isoformat()
+        try:
+            result = _execute_query(
+                supabase.table("customer_instagram_history")
+                .select("purchase_count, total_spend, first_purchase, last_purchase, "
+                        "customer_tags, instagram_interactions, average_order_value")
+                .eq("email", email)
+                .gte("last_purchase", history_cutoff)
+                .limit(1),
+                table="customer_instagram_history",
+                operation="select"
+            )
+            history = result.data[0] if result.data else {}
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping customer history fetch")
+        except Exception as e:
+            logger.warning(f"Failed to fetch customer history for {email}: {e}")
+
+        # Query 2: Recent Instagram engagements
+        eng_cutoff = (datetime.now(timezone.utc) - timedelta(days=engagement_days)).isoformat()
+        try:
+            result = _execute_query(
+                supabase.table("instagram_engagements")
+                .select("engagement_type, content_id, post_id, timestamp, metadata")
+                .eq("customer_email", email)
+                .eq("business_account_id", business_account_id)
+                .gte("timestamp", eng_cutoff)
+                .order("timestamp", desc=False)
+                .limit(100),
+                table="instagram_engagements",
+                operation="select"
+            )
+            engagements = result.data or []
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping recent engagements fetch")
+        except Exception as e:
+            logger.warning(f"Failed to fetch engagements for {email}: {e}")
+
+        return {"history": history, "engagements": engagements}
+
+    # --------------------------------------------------
+    # WRITE: Save Attribution (Sales Attribution)
+    # --------------------------------------------------
+    @staticmethod
+    def save_attribution(data: dict) -> dict:
+        """Insert a completed attribution result into sales_attributions."""
+        if not supabase:
+            return {}
+
+        try:
+            result = _execute_query(
+                supabase.table("sales_attributions").insert(data),
+                table="sales_attributions",
+                operation="insert"
+            )
+            return result.data[0] if result.data else {}
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to save attribution")
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to save attribution: {e}")
+            return {}
+
+    # --------------------------------------------------
+    # WRITE: Queue for Review (Sales Attribution)
+    # --------------------------------------------------
+    @staticmethod
+    def queue_for_review(data: dict) -> dict:
+        """Insert an attribution that needs manual review."""
+        if not supabase:
+            return {}
+
+        try:
+            result = _execute_query(
+                supabase.table("attribution_review_queue").insert(data),
+                table="attribution_review_queue",
+                operation="insert"
+            )
+            return result.data[0] if result.data else {}
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to queue for review")
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to queue for review: {e}")
+            return {}
+
+    # --------------------------------------------------
+    # READ: Last Week Attributions (Weekly Learning)
+    # --------------------------------------------------
+    @staticmethod
+    def get_last_week_attributions(business_account_id: str = None) -> list:
+        """Fetch last 7 days of attributions for weekly learning.
+
+        If business_account_id provided, filters by account.
+        """
+        if not supabase:
+            return []
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+        try:
+            query = (
+                supabase.table("sales_attributions")
+                .select("order_id, order_value, attribution_method, attribution_score, "
+                        "model_scores, auto_approved, validation_results, "
+                        "business_account_id, processed_at")
+                .gte("processed_at", cutoff)
+            )
+            if business_account_id:
+                query = query.eq("business_account_id", business_account_id)
+
+            result = _execute_query(query, table="sales_attributions", operation="select")
+            return result.data or []
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping last week attributions fetch")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to fetch last week attributions: {e}")
+            return []
+
+    # --------------------------------------------------
+    # WRITE: Update Attribution Model Weights (Weekly Learning)
+    # --------------------------------------------------
+    @staticmethod
+    def update_attribution_model_weights(
+        business_account_id: str,
+        weights: dict,
+        metrics: dict,
+        notes: str = "",
+    ) -> bool:
+        """Upsert attribution model weights for a business account.
+
+        Invalidates L1 cache after write.
+        """
+        if not supabase or not business_account_id:
+            return False
+
+        row = {
+            "business_account_id": business_account_id,
+            "weights": weights,
+            "performance_metrics": metrics,
+            "learning_notes": notes,
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            _execute_query(
+                supabase.table("attribution_models")
+                .upsert(row, on_conflict="business_account_id"),
+                table="attribution_models",
+                operation="upsert"
+            )
+
+            # Invalidate L1 cache
+            cache_key = f"attr_model:{business_account_id}"
+            if cache_key in _attribution_model_cache:
+                del _attribution_model_cache[cache_key]
+
+            return True
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to update model weights")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to update model weights: {e}")
+            return False
+
+    # --------------------------------------------------
+    # READ: Attribution Model Weights (Sales Attribution)
+    # --------------------------------------------------
+    @staticmethod
+    def get_attribution_model_weights(business_account_id: str) -> dict:
+        """Fetch current attribution model weights.
+
+        L1 in-memory (5 min TTL) -> L2 Redis (5 min TTL) -> Supabase.
+        Returns default weights if no custom model exists.
+        """
+        default_weights = {
+            "last_touch": 0.40, "first_touch": 0.20,
+            "linear": 0.20, "time_decay": 0.20,
+        }
+        if not supabase or not business_account_id:
+            return default_weights
+
+        cache_key = f"attr_model:{business_account_id}"
+
+        # L1: Check in-memory cache
+        if cache_key in _attribution_model_cache:
+            CACHE_HITS.labels(key_type="attribution_model_l1").inc()
+            return _attribution_model_cache[cache_key]
+
+        # L2: Check Redis cache
+        cached = _cache_get(cache_key)
+        if cached:
+            CACHE_HITS.labels(key_type="attribution_model_l2").inc()
+            _attribution_model_cache[cache_key] = cached
+            return cached
+
+        CACHE_MISSES.labels(key_type="attribution_model").inc()
+
+        try:
+            result = _execute_query(
+                supabase.table("attribution_models")
+                .select("weights")
+                .eq("business_account_id", business_account_id)
+                .limit(1),
+                table="attribution_models",
+                operation="select"
+            )
+
+            if result.data:
+                weights = result.data[0].get("weights", default_weights)
+                _attribution_model_cache[cache_key] = weights
+                _cache_set(cache_key, weights, ttl=300)
+                return weights
+
+            return default_weights
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — using default attribution weights")
+            return default_weights
+        except Exception as e:
+            logger.warning(f"Failed to fetch model weights: {e}")
+            return default_weights
 
     # --------------------------------------------------
     # WRITE: Audit Log

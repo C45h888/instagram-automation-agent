@@ -336,4 +336,61 @@ Asset: Office workspace, tags: ["productivity", "work"]
 
 Respond with ONLY valid JSON:
 {{"hook": "...", "body": "...", "cta": "...", "hashtags": ["tag1", "tag2", ...], "quality_score": 0.0, "approved": true, "modifications": {{"caption": "improved full caption or null", "hashtags": ["improved", "tags", "or", "null"]}}, "reasoning": "brief explanation"}}""",
+
+    "generate_and_evaluate_attribution": """You are a sales attribution quality analyst for an Instagram-driven e-commerce business.
+
+TASK: Evaluate the attribution data below for quality, logical consistency, and potential fraud.
+The signal detection, journey reconstruction, and multi-touch model scores were computed by deterministic code.
+Your job is to VALIDATE the results, flag concerns, and determine if this attribution should be auto-approved.
+
+ORDER DETAILS:
+- Order ID: {order_id}
+- Order Value: ${order_value}
+- Order Date: {order_date}
+- Customer Email: {customer_email}
+- Products: {products}
+
+DETECTED SIGNALS ({signal_count} total):
+{signals_summary}
+
+CUSTOMER JOURNEY:
+- Total Touchpoints: {total_touchpoints}
+- Days to Purchase: {days_to_purchase}
+- Journey Summary: {journey_summary}
+
+MULTI-TOUCH MODEL SCORES:
+- Last Touch: {last_touch_score}
+- First Touch: {first_touch_score}
+- Linear: {linear_score}
+- Time Decay: {time_decay_score}
+- Final Weighted: {final_weighted_score}
+
+ATTRIBUTION METHOD: {attribution_method}
+ATTRIBUTION SCORE: {attribution_score}/100
+
+EVALUATION CRITERIA:
+1. Logical Consistency (30%): Do the signals match the journey? Does the attribution method make sense?
+2. Data Quality (25%): Are signals genuine? Any missing data that weakens confidence?
+3. Fraud Risk (25%): Self-referral patterns? Impossible timelines? Suspicious discount usage?
+4. Confidence Level (20%): How confident should we be in this attribution?
+
+FRAUD INDICATORS (flag if any):
+- Customer created account same day as purchase with high-value discount
+- UTM source matches customer's own social handle
+- Impossible engagement timeline (interactions after purchase)
+- Discount code used more times than expected
+
+FEW-SHOT EXAMPLES:
+
+Example 1 (high confidence, auto-approve):
+{{"quality_score": 8.5, "approved": true, "concerns": [], "fraud_risk": "low", "logical_consistency": "strong", "reasoning": "Clear UTM trail from Instagram ad to purchase. 5 touchpoints over 12 days show genuine engagement funnel. Discount code matches active campaign."}}
+
+Example 2 (medium confidence, approve with notes):
+{{"quality_score": 6.8, "approved": true, "concerns": ["Limited engagement history - only 2 touchpoints", "No direct click-through detected"], "fraud_risk": "low", "logical_consistency": "moderate", "reasoning": "Attribution relies heavily on discount code signal. Customer history is thin but legitimate. Score is moderate due to limited journey data."}}
+
+Example 3 (fraud flagged, reject):
+{{"quality_score": 3.2, "approved": false, "concerns": ["Discount code used 47 times in 24 hours", "Account created same day as purchase", "UTM source matches customer social handle"], "fraud_risk": "high", "logical_consistency": "weak", "reasoning": "Multiple fraud indicators present. Discount code abuse pattern detected. Self-referral likely. Recommend manual review and potential code revocation."}}
+
+Respond with ONLY valid JSON:
+{{"quality_score": 0.0, "approved": true, "concerns": [], "fraud_risk": "low", "logical_consistency": "strong", "reasoning": "brief explanation"}}""",
 }

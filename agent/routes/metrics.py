@@ -109,6 +109,49 @@ CONTENT_SCHEDULER_DURATION = Histogram(
 )
 
 
+# ================================
+# Sales Attribution Metrics
+# ================================
+ATTRIBUTION_RUNS = Counter(
+    "agent_attribution_runs_total",
+    "Attribution webhook calls",
+    ["status"],  # started, success, error, invalid_signature, parse_error, hard_rule, fast_path
+)
+
+ATTRIBUTION_RESULTS = Counter(
+    "agent_attribution_results_total",
+    "Attribution outcomes",
+    ["action"],  # auto_approved, queued_review, fast_path_approved, error
+)
+
+ATTRIBUTION_SCORES = Histogram(
+    "agent_attribution_scores",
+    "Attribution score distribution",
+    buckets=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+)
+
+ATTRIBUTION_DURATION = Histogram(
+    "agent_attribution_duration_seconds",
+    "Attribution processing time",
+    buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 30.0],
+)
+
+ATTRIBUTION_TOUCHPOINTS = Histogram(
+    "agent_attribution_touchpoints",
+    "Touchpoints per attribution",
+    buckets=[0, 1, 2, 3, 5, 10, 20],
+)
+
+# ================================
+# Weekly Learning Metrics
+# ================================
+WEEKLY_LEARNING_RUNS = Counter(
+    "agent_weekly_learning_runs_total",
+    "Weekly learning cycles",
+    ["status"],  # success, error, partial, no_accounts
+)
+
+
 @metrics_router.get("/metrics")
 async def metrics():
     """Expose Prometheus metrics. No auth (in PUBLIC_PATHS)."""
