@@ -1,7 +1,7 @@
 """
 Scheduler Service
 ==================
-APScheduler wrapper for the engagement monitor, content scheduler, and weekly attribution learning.
+APScheduler wrapper for the engagement monitor, content scheduler, weekly attribution learning, and UGC collection.
 
 Features:
   - AsyncIOScheduler for non-blocking execution
@@ -27,10 +27,13 @@ from config import (
     WEEKLY_LEARNING_ENABLED,
     WEEKLY_LEARNING_DAY,
     WEEKLY_LEARNING_HOUR,
+    UGC_COLLECTION_ENABLED,
+    UGC_COLLECTION_INTERVAL_HOURS,
 )
 from scheduler.engagement_monitor import engagement_monitor_run
 from scheduler.content_scheduler import content_scheduler_run
 from scheduler.weekly_attribution_learning import weekly_attribution_learning_run
+from scheduler.ugc_discovery import ugc_discovery_run
 
 
 class SchedulerService:
@@ -114,6 +117,22 @@ class SchedulerService:
         else:
             logger.info("Weekly Attribution Learning disabled (SALES_ATTRIBUTION_ENABLED or WEEKLY_LEARNING_ENABLED=false)")
 
+        # --- UGC Collection (interval-based) ---
+        if UGC_COLLECTION_ENABLED:
+            cls._scheduler.add_job(
+                cls._make_tracked_runner("ugc_collection", ugc_discovery_run),
+                "interval",
+                hours=UGC_COLLECTION_INTERVAL_HOURS,
+                id="ugc_collection",
+                name="UGC Collection",
+            )
+            cls._job_stats["ugc_collection"] = {"last_run_time": None, "total_runs": 0}
+            logger.info(
+                f"UGC Collection scheduled (every {UGC_COLLECTION_INTERVAL_HOURS} hours)"
+            )
+        else:
+            logger.info("UGC Collection disabled (UGC_COLLECTION_ENABLED=false)")
+
         cls._scheduler.start()
         logger.info("Scheduler started")
 
@@ -185,6 +204,13 @@ class SchedulerService:
             {"day_of_week": WEEKLY_LEARNING_DAY, "hour": WEEKLY_LEARNING_HOUR},
         )
 
+        # UGC collection (interval-based)
+        result["ugc_collection"] = cls._get_job_status(
+            "ugc_collection",
+            UGC_COLLECTION_ENABLED,
+            {"interval_hours": UGC_COLLECTION_INTERVAL_HOURS},
+        )
+
         return result
 
     @classmethod
@@ -250,6 +276,7 @@ class SchedulerService:
             "engagement_monitor": engagement_monitor_run,
             "content_scheduler": content_scheduler_run,
             "weekly_learning": weekly_attribution_learning_run,
+            "ugc_collection": ugc_discovery_run,
         }
         func = runners.get(job_prefix)
         if not func:

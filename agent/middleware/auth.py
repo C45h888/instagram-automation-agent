@@ -22,6 +22,7 @@ PUBLIC_PATHS = {
     "/content-scheduler/status",   # Read-only scheduler status
     "/webhook/order-created",      # Verified via X-Hub-Signature-256
     "/sales-attribution/status",   # Read-only scheduler status
+    "/ugc-collection/status",      # Read-only scheduler status
 }
 
 

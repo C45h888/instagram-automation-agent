@@ -28,6 +28,10 @@ Endpoints:
   POST /sales-attribution/trigger    - Manual trigger learning
   POST /sales-attribution/pause      - Pause weekly learning
   POST /sales-attribution/resume     - Resume weekly learning
+  GET  /ugc-collection/status        - UGC collection status
+  POST /ugc-collection/trigger       - Manual trigger UGC discovery
+  POST /ugc-collection/pause         - Pause UGC collection
+  POST /ugc-collection/resume        - Resume UGC collection
 """
 
 import os
@@ -41,7 +45,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED
+from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED
 from middleware import api_key_middleware
 from services.prompt_service import PromptService
 from scheduler.scheduler_service import SchedulerService
@@ -60,6 +64,7 @@ from routes import (
     content_scheduler_router,
     webhook_order_router,
     attribution_router,
+    ugc_collection_router,
 )
 
 
@@ -84,6 +89,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Content Scheduler: {'enabled' if CONTENT_SCHEDULER_ENABLED else 'disabled'}")
     logger.info(f"  Sales Attribution: {'enabled' if SALES_ATTRIBUTION_ENABLED else 'disabled'}")
     logger.info(f"  Weekly Learning: {'enabled' if WEEKLY_LEARNING_ENABLED else 'disabled'}")
+    logger.info(f"  UGC Collection: {'enabled' if UGC_COLLECTION_ENABLED else 'disabled'}")
     yield
     # Shutdown cleanup
     SchedulerService.shutdown()
@@ -134,6 +140,7 @@ app.include_router(engagement_monitor_router)
 app.include_router(content_scheduler_router)
 app.include_router(webhook_order_router)
 app.include_router(attribution_router)
+app.include_router(ugc_collection_router)
 
 
 # ================================

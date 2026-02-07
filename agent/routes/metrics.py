@@ -151,6 +151,27 @@ WEEKLY_LEARNING_RUNS = Counter(
     ["status"],  # success, error, partial, no_accounts
 )
 
+# ================================
+# UGC Collection Metrics
+# ================================
+UGC_COLLECTION_RUNS = Counter(
+    "agent_ugc_collection_runs_total",
+    "UGC discovery cycles completed",
+    ["status"],  # success, error, partial, no_accounts
+)
+
+UGC_COLLECTION_ITEMS = Counter(
+    "agent_ugc_collection_items_total",
+    "UGC posts processed by discovery",
+    ["action"],  # high_quality, moderate, discarded, duplicates_skipped, dms_sent, errors
+)
+
+UGC_COLLECTION_DURATION = Histogram(
+    "agent_ugc_collection_duration_seconds",
+    "Duration of UGC discovery cycle",
+    buckets=[10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
+)
+
 
 @metrics_router.get("/metrics")
 async def metrics():

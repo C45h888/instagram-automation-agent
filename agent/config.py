@@ -73,6 +73,9 @@ def validate_schema():
         "sales_attributions": ["order_id", "order_value", "attribution_score", "auto_approved", "business_account_id"],
         "attribution_review_queue": ["order_id", "review_status", "business_account_id"],
         "attribution_models": ["weights", "business_account_id"],
+        "ugc_monitored_hashtags": ["business_account_id", "hashtag", "is_active"],
+        "ugc_discovered": ["business_account_id", "instagram_media_id", "quality_score", "quality_tier"],
+        "ugc_permissions": ["ugc_discovered_id", "business_account_id", "status"],
     }
     for table, columns in optional_tables.items():
         try:
@@ -171,6 +174,27 @@ CONTENT_SCHEDULER_MAX_ASSETS_TO_SCORE = int(os.getenv("CONTENT_SCHEDULER_MAX_ASS
 
 # Backend publish endpoint
 BACKEND_PUBLISH_POST_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/publish-post"
+
+# ================================
+# UGC Collection (Scheduler)
+# ================================
+UGC_COLLECTION_ENABLED = os.getenv("UGC_COLLECTION_ENABLED", "true").lower() == "true"
+UGC_COLLECTION_INTERVAL_HOURS = int(os.getenv("UGC_COLLECTION_INTERVAL_HOURS", "4"))
+UGC_COLLECTION_MAX_POSTS_PER_HASHTAG = int(os.getenv("UGC_COLLECTION_MAX_POSTS_PER_HASHTAG", "30"))
+UGC_COLLECTION_MAX_TAGGED_POSTS = int(os.getenv("UGC_COLLECTION_MAX_TAGGED_POSTS", "25"))
+UGC_COLLECTION_MAX_CONCURRENT_ACCOUNTS = int(os.getenv("UGC_COLLECTION_MAX_CONCURRENT_ACCOUNTS", "2"))
+UGC_COLLECTION_HIGH_QUALITY_THRESHOLD = int(os.getenv("UGC_COLLECTION_HIGH_QUALITY_THRESHOLD", "70"))
+UGC_COLLECTION_MODERATE_QUALITY_THRESHOLD = int(os.getenv("UGC_COLLECTION_MODERATE_QUALITY_THRESHOLD", "41"))
+UGC_COLLECTION_AUTO_SEND_DM = os.getenv("UGC_COLLECTION_AUTO_SEND_DM", "false").lower() == "true"
+UGC_COLLECTION_PRODUCT_KEYWORDS = os.getenv(
+    "UGC_COLLECTION_PRODUCT_KEYWORDS",
+    "wearing,styled,love my,obsessed with,favorite"
+).split(",")
+
+# Backend UGC endpoints
+BACKEND_SEARCH_HASHTAG_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/search-hashtag"
+BACKEND_GET_TAGS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/tags"
+BACKEND_SEND_DM_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/send-dm"
 
 # ================================
 # Sales Attribution

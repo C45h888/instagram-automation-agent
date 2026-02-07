@@ -896,6 +896,198 @@ class SupabaseService:
             return False
 
     # --------------------------------------------------
+    # READ: Monitored Hashtags (UGC Collection)
+    # --------------------------------------------------
+    @staticmethod
+    def get_monitored_hashtags(business_account_id: str) -> list:
+        """Fetch active monitored hashtags for UGC discovery.
+
+        Returns list of dicts with: id, hashtag.
+        """
+        if not supabase or not business_account_id:
+            return []
+
+        try:
+            result = _execute_query(
+                supabase.table("ugc_monitored_hashtags")
+                .select("id, hashtag")
+                .eq("business_account_id", business_account_id)
+                .eq("is_active", True),
+                table="ugc_monitored_hashtags",
+                operation="select"
+            )
+            return result.data or []
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping monitored hashtags fetch")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to fetch monitored hashtags for {business_account_id}: {e}")
+            return []
+
+    # --------------------------------------------------
+    # READ: Existing UGC IDs (UGC Collection — DB-level dedup)
+    # --------------------------------------------------
+    @staticmethod
+    def get_existing_ugc_ids(business_account_id: str) -> set:
+        """Fetch instagram_media_ids already in ugc_discovered for this account.
+
+        Used as authoritative dedup when Redis is unavailable.
+        """
+        if not supabase or not business_account_id:
+            return set()
+
+        try:
+            result = _execute_query(
+                supabase.table("ugc_discovered")
+                .select("instagram_media_id")
+                .eq("business_account_id", business_account_id),
+                table="ugc_discovered",
+                operation="select"
+            )
+            return {row["instagram_media_id"] for row in (result.data or [])}
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping existing UGC IDs fetch")
+            return set()
+        except Exception as e:
+            logger.warning(f"Failed to fetch existing UGC IDs: {e}")
+            return set()
+
+    # --------------------------------------------------
+    # WRITE: Create UGC Discovered (UGC Collection)
+    # --------------------------------------------------
+    @staticmethod
+    def create_ugc_discovered(data: dict) -> dict:
+        """Insert a discovered UGC post into ugc_discovered.
+
+        Expected data keys:
+          business_account_id, instagram_media_id, source, source_hashtag,
+          username, caption, media_type, media_url, permalink,
+          like_count, comments_count, quality_score, quality_tier,
+          quality_factors, post_timestamp, run_id
+        """
+        if not supabase:
+            return {}
+
+        try:
+            result = _execute_query(
+                supabase.table("ugc_discovered").insert(data),
+                table="ugc_discovered",
+                operation="insert"
+            )
+            return result.data[0] if result.data else {}
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to create ugc_discovered")
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to create ugc_discovered: {e}")
+            return {}
+
+    # --------------------------------------------------
+    # WRITE: Create UGC Permission (UGC Collection)
+    # --------------------------------------------------
+    @staticmethod
+    def create_ugc_permission(data: dict) -> dict:
+        """Insert a UGC permission request into ugc_permissions.
+
+        Expected data keys:
+          ugc_discovered_id, business_account_id, username,
+          dm_message_text, status, run_id
+        """
+        if not supabase:
+            return {}
+
+        try:
+            result = _execute_query(
+                supabase.table("ugc_permissions").insert(data),
+                table="ugc_permissions",
+                operation="insert"
+            )
+            return result.data[0] if result.data else {}
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to create ugc_permission")
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to create ugc_permission: {e}")
+            return {}
+
+    # --------------------------------------------------
+    # WRITE: Update UGC Permission Status (UGC Collection)
+    # --------------------------------------------------
+    @staticmethod
+    def update_ugc_permission_status(
+        permission_id: str,
+        status: str,
+        extra_fields: dict = None,
+    ) -> bool:
+        """Update UGC permission status (pending_send -> sent -> granted/denied)."""
+        if not supabase or not permission_id:
+            return False
+
+        update_data = {
+            "status": status,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if extra_fields:
+            update_data.update(extra_fields)
+
+        try:
+            _execute_query(
+                supabase.table("ugc_permissions")
+                .update(update_data)
+                .eq("id", permission_id),
+                table="ugc_permissions",
+                operation="update"
+            )
+            return True
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to update ugc_permission status")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to update ugc_permission {permission_id}: {e}")
+            return False
+
+    # --------------------------------------------------
+    # READ: UGC Stats (UGC Collection — for status endpoint)
+    # --------------------------------------------------
+    @staticmethod
+    def get_ugc_stats(business_account_id: str = None) -> dict:
+        """Aggregate UGC discovery stats for the status endpoint.
+
+        Returns counts by quality tier.
+        """
+        if not supabase:
+            return {}
+
+        try:
+            query = supabase.table("ugc_discovered").select("id", count="exact")
+            if business_account_id:
+                query = query.eq("business_account_id", business_account_id)
+            result = _execute_query(query, table="ugc_discovered", operation="select")
+            total = result.count or 0
+
+            tiers = {}
+            for tier in ("high", "moderate"):
+                q = supabase.table("ugc_discovered").select("id", count="exact").eq("quality_tier", tier)
+                if business_account_id:
+                    q = q.eq("business_account_id", business_account_id)
+                r = _execute_query(q, table="ugc_discovered", operation="select")
+                tiers[tier] = r.count or 0
+
+            return {"total_discovered": total, "by_tier": tiers}
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping UGC stats")
+            return {}
+        except Exception as e:
+            logger.warning(f"Failed to fetch UGC stats: {e}")
+            return {}
+
+    # --------------------------------------------------
     # READ: Order Attribution (Sales Attribution - dedup)
     # --------------------------------------------------
     @staticmethod
