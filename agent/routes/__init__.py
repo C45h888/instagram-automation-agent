@@ -11,3 +11,4 @@ from .content_scheduler_routes import content_scheduler_router
 from .webhook_order import webhook_order_router
 from .attribution_routes import attribution_router
 from .ugc_collection_routes import ugc_collection_router
+from .analytics_routes import analytics_router

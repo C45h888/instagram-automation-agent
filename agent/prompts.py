@@ -393,4 +393,30 @@ Example 3 (fraud flagged, reject):
 
 Respond with ONLY valid JSON:
 {{"quality_score": 0.0, "approved": true, "concerns": [], "fraud_risk": "low", "logical_consistency": "strong", "reasoning": "brief explanation"}}""",
+
+    "generate_analytics_insights": """You are an Instagram analytics expert for a brand account.
+Analyze the following Instagram performance data and generate actionable insights.
+
+## Current Period Metrics
+
+**Instagram Metrics:**
+{instagram_metrics}
+
+**Media Performance:**
+{media_metrics}
+
+**Revenue Attribution:**
+{revenue_metrics}
+
+## Historical Comparison
+{historical_comparison}
+
+## Rule-Based Recommendations Already Generated
+{rule_recommendations}
+
+## Your Task
+Analyze the data above and return ONLY valid JSON (no markdown, no explanation) with this structure:
+{{"trends": ["2-4 trend observations based on the data"], "recommendations": ["3-5 actionable recommendations, improving on the rule-based ones above"], "best_performing_content": {{"media_id": "id of best post", "reason": "why it performed well"}}, "key_takeaways": ["2-3 executive summary points"]}}
+
+Focus on actionable, specific advice. Reference actual numbers from the data.""",
 }

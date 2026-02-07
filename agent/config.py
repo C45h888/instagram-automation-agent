@@ -76,6 +76,7 @@ def validate_schema():
         "ugc_monitored_hashtags": ["business_account_id", "hashtag", "is_active"],
         "ugc_discovered": ["business_account_id", "instagram_media_id", "quality_score", "quality_tier"],
         "ugc_permissions": ["ugc_discovered_id", "business_account_id", "status"],
+        "analytics_reports": ["business_account_id", "report_type", "report_date", "instagram_metrics", "insights"],
     }
     for table, columns in optional_tables.items():
         try:
@@ -214,3 +215,19 @@ ORDER_WEBHOOK_SECRET = os.getenv("ORDER_WEBHOOK_SECRET", "")
 WEEKLY_LEARNING_ENABLED = os.getenv("WEEKLY_LEARNING_ENABLED", "true").lower() == "true"
 WEEKLY_LEARNING_DAY = os.getenv("WEEKLY_LEARNING_DAY", "mon")
 WEEKLY_LEARNING_HOUR = int(os.getenv("WEEKLY_LEARNING_HOUR", "8"))
+
+# ================================
+# Analytics Reports
+# ================================
+ANALYTICS_REPORTS_ENABLED = os.getenv("ANALYTICS_REPORTS_ENABLED", "true").lower() == "true"
+ANALYTICS_DAILY_HOUR = int(os.getenv("ANALYTICS_DAILY_HOUR", "23"))
+ANALYTICS_DAILY_MINUTE = int(os.getenv("ANALYTICS_DAILY_MINUTE", "0"))
+ANALYTICS_WEEKLY_DAY = os.getenv("ANALYTICS_WEEKLY_DAY", "sun")
+ANALYTICS_WEEKLY_HOUR = int(os.getenv("ANALYTICS_WEEKLY_HOUR", "23"))
+ANALYTICS_HISTORICAL_DAYS = int(os.getenv("ANALYTICS_HISTORICAL_DAYS", "30"))
+ANALYTICS_MAX_CONCURRENT_ACCOUNTS = int(os.getenv("ANALYTICS_MAX_CONCURRENT_ACCOUNTS", "3"))
+ANALYTICS_LLM_INSIGHTS_ENABLED = os.getenv("ANALYTICS_LLM_INSIGHTS_ENABLED", "false").lower() == "true"
+
+# Backend analytics proxy endpoints
+BACKEND_ACCOUNT_INSIGHTS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/account-insights"
+BACKEND_MEDIA_INSIGHTS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/media-insights"

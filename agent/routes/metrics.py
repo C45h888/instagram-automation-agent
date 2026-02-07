@@ -172,6 +172,27 @@ UGC_COLLECTION_DURATION = Histogram(
     buckets=[10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
 )
 
+# ================================
+# Analytics Reports Metrics
+# ================================
+ANALYTICS_REPORT_RUNS = Counter(
+    "agent_analytics_report_runs_total",
+    "Analytics report cycles completed",
+    ["status"],  # success, partial, error, no_accounts
+)
+
+ANALYTICS_REPORTS_GENERATED = Counter(
+    "agent_analytics_reports_generated_total",
+    "Analytics reports generated",
+    ["report_type"],  # daily, weekly
+)
+
+ANALYTICS_REPORT_DURATION = Histogram(
+    "agent_analytics_report_duration_seconds",
+    "Duration of analytics report cycle",
+    buckets=[5.0, 15.0, 30.0, 60.0, 120.0, 300.0],
+)
+
 
 @metrics_router.get("/metrics")
 async def metrics():

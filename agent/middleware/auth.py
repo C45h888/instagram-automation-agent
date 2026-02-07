@@ -23,6 +23,7 @@ PUBLIC_PATHS = {
     "/webhook/order-created",      # Verified via X-Hub-Signature-256
     "/sales-attribution/status",   # Read-only scheduler status
     "/ugc-collection/status",      # Read-only scheduler status
+    "/analytics-reports/status",   # Read-only scheduler status
 }
 
 

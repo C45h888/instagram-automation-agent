@@ -1,7 +1,7 @@
 """
 Scheduler Service
 ==================
-APScheduler wrapper for the engagement monitor, content scheduler, weekly attribution learning, and UGC collection.
+APScheduler wrapper for the engagement monitor, content scheduler, weekly attribution learning, UGC collection, and analytics reports.
 
 Features:
   - AsyncIOScheduler for non-blocking execution
@@ -29,11 +29,17 @@ from config import (
     WEEKLY_LEARNING_HOUR,
     UGC_COLLECTION_ENABLED,
     UGC_COLLECTION_INTERVAL_HOURS,
+    ANALYTICS_REPORTS_ENABLED,
+    ANALYTICS_DAILY_HOUR,
+    ANALYTICS_DAILY_MINUTE,
+    ANALYTICS_WEEKLY_DAY,
+    ANALYTICS_WEEKLY_HOUR,
 )
 from scheduler.engagement_monitor import engagement_monitor_run
 from scheduler.content_scheduler import content_scheduler_run
 from scheduler.weekly_attribution_learning import weekly_attribution_learning_run
 from scheduler.ugc_discovery import ugc_discovery_run
+from scheduler.analytics_reports import analytics_reports_run
 
 
 class SchedulerService:
@@ -133,6 +139,41 @@ class SchedulerService:
         else:
             logger.info("UGC Collection disabled (UGC_COLLECTION_ENABLED=false)")
 
+        # --- Analytics Reports (cron-based: daily + weekly) ---
+        if ANALYTICS_REPORTS_ENABLED:
+            cls._scheduler.add_job(
+                cls._make_tracked_runner(
+                    "analytics_daily",
+                    lambda: analytics_reports_run("daily"),
+                ),
+                "cron",
+                hour=ANALYTICS_DAILY_HOUR,
+                minute=ANALYTICS_DAILY_MINUTE,
+                id="analytics_daily",
+                name="Analytics Daily Report",
+            )
+            cls._job_stats["analytics_daily"] = {"last_run_time": None, "total_runs": 0}
+
+            cls._scheduler.add_job(
+                cls._make_tracked_runner(
+                    "analytics_weekly",
+                    lambda: analytics_reports_run("weekly"),
+                ),
+                "cron",
+                day_of_week=ANALYTICS_WEEKLY_DAY,
+                hour=ANALYTICS_WEEKLY_HOUR,
+                id="analytics_weekly",
+                name="Analytics Weekly Report",
+            )
+            cls._job_stats["analytics_weekly"] = {"last_run_time": None, "total_runs": 0}
+
+            logger.info(
+                f"Analytics Reports scheduled (daily at {ANALYTICS_DAILY_HOUR:02d}:{ANALYTICS_DAILY_MINUTE:02d}, "
+                f"weekly on {ANALYTICS_WEEKLY_DAY} at {ANALYTICS_WEEKLY_HOUR:02d}:00)"
+            )
+        else:
+            logger.info("Analytics Reports disabled (ANALYTICS_REPORTS_ENABLED=false)")
+
         cls._scheduler.start()
         logger.info("Scheduler started")
 
@@ -211,6 +252,18 @@ class SchedulerService:
             {"interval_hours": UGC_COLLECTION_INTERVAL_HOURS},
         )
 
+        # Analytics reports (daily + weekly cron jobs)
+        result["analytics_daily"] = cls._get_job_status(
+            "analytics_daily",
+            ANALYTICS_REPORTS_ENABLED,
+            {"hour": ANALYTICS_DAILY_HOUR, "minute": ANALYTICS_DAILY_MINUTE},
+        )
+        result["analytics_weekly"] = cls._get_job_status(
+            "analytics_weekly",
+            ANALYTICS_REPORTS_ENABLED,
+            {"day_of_week": ANALYTICS_WEEKLY_DAY, "hour": ANALYTICS_WEEKLY_HOUR},
+        )
+
         return result
 
     @classmethod
@@ -277,6 +330,8 @@ class SchedulerService:
             "content_scheduler": content_scheduler_run,
             "weekly_learning": weekly_attribution_learning_run,
             "ugc_collection": ugc_discovery_run,
+            "analytics_daily": lambda: analytics_reports_run("daily"),
+            "analytics_weekly": lambda: analytics_reports_run("weekly"),
         }
         func = runners.get(job_prefix)
         if not func:
