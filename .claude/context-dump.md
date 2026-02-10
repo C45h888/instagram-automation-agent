@@ -98,3 +98,80 @@ Audit logging to Supabase
 Docker Compose (frontend, backend, agent + Ollama)
 No N8N in production
 RAM target: <7 GB total on CX33
+
+
+
+
+Final Architecture Context Dump (Single Source of Truth)
+Core Principle
+
+Agent never holds IG tokens
+Backend is the only place that holds IG tokens and makes Graph API calls
+Frontend never depends on agent for live IG events
+Agent receives only a subset of IG webhooks directly (comments, mentions, story mentions)
+All other data comes via Supabase (read) or backend proxy (on-demand)
+
+Data Flow Diagram
+textMeta Instagram Graph API
+        │
+        │ Webhooks (ALL events: comments, mentions, story mentions, DMs, tags, etc.)
+        ▼
+Backend (port 3000/3001)
+   ├── Verify HMAC signature
+   ├── Store raw event in Supabase
+   ├── Broadcast to frontend via /realtime-updates cache
+   └── (Optional: forward specific events to agent via REST if needed in future)
+
+Frontend (Dashboard)
+   ├── Reads Supabase for all historical / processed data
+   └── Polls /realtime-updates for live IG events (unchanged)
+
+Agent (port 3002)
+   ├── Receives direct IG webhooks ONLY for:
+   │     - Comments
+   │     - Mentions (captions/comments)
+   │     - Story mentions
+   ├── Reads Supabase directly for all other data (UGC, attributions, reports, audit_log, etc.)
+   └── Calls backend proxy REST endpoints for data it cannot get otherwise:
+         - search-hashtag
+         - tags
+         - send-dm
+         - publish-post
+         - insights
+         - (any other Graph API data that requires token)
+
+Execution Flow (Agent wants to act):
+Agent → POST /api/instagram/send-dm (or publish-post, search-hashtag, etc.)
+   ↓
+Backend:
+   - Validate X-API-Key
+   - Lookup long-lived token
+   - Call Graph API
+   - logApiCall(...)
+   - Return clean JSON only
+   ↓
+Agent:
+   - Process response
+   - Write outcome to Supabase
+   - log_decision(...)
+Locked Rules
+
+Agent direct webhooks → only comments, mentions, story mentions
+All other IG data → backend proxy or Supabase read
+Frontend live events → backend /realtime-updates (unchanged)
+Backend role → execution + proxy + webhook receiver + logging
+Agent role → automation + decision making + summaries + Oversight Brain
+
+What This Means for the Plan
+The previous plan had one flaw: it assumed the agent would receive all IG webhooks directly.
+That is now corrected.
+The backend proxy endpoints we planned are still exactly correct:
+
+search-hashtag
+tags
+send-dm
+publish-post
+insights
+
+These are the calls the agent must make to the backend because it cannot get that data via webhook or Supabase.
+

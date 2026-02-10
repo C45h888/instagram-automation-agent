@@ -14,8 +14,7 @@ AgentService.analyze_async() for optional insights.
 
 import json
 import asyncio
-import logging
-from datetime import date, datetime, timezone
+from datetime import date
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -30,26 +29,15 @@ from config import (
 
 
 # ================================
-# Singleton Agent / Prompt Service (lazy import to avoid circular)
+# Singleton AgentService (lazy import to avoid circular)
 # ================================
 _agent_service = None
-_prompt_service = None
-
-
 def _get_agent_service():
     global _agent_service
     if _agent_service is None:
         from services.agent_service import AgentService
         _agent_service = AgentService()
     return _agent_service
-
-
-def _get_prompt_service():
-    global _prompt_service
-    if _prompt_service is None:
-        from services.prompt_service import PromptService
-        _prompt_service = PromptService
-    return _prompt_service
 
 
 # ================================
@@ -166,6 +154,8 @@ async def collect_instagram_data(
         account_metrics = proxy_account
     else:
         # Route 2: Fall back to Supabase DB
+        if "supabase_db" not in data_sources:
+            data_sources.append("supabase_db")
         account_metrics = SupabaseService.get_account_follower_snapshot(business_account_id)
         # Account-level reach/impressions not available from DB alone
 
@@ -472,9 +462,9 @@ async def generate_llm_insights(
     Uses AgentService.analyze_async() — mirrors content_tools.py pattern.
     """
     agent_svc = _get_agent_service()
-    prompt_svc = _get_prompt_service()
 
-    prompt_template = prompt_svc.get_prompt("generate_analytics_insights")
+    from services.prompt_service import PromptService
+    prompt_template = PromptService.get("generate_analytics_insights")
     prompt = prompt_template.format(
         instagram_metrics=json.dumps(aggregated["instagram_metrics"], indent=2),
         media_metrics=json.dumps(aggregated["media_metrics"], indent=2),

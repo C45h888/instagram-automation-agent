@@ -1,12 +1,14 @@
 """
-DM Webhook Route
-=================
-Receives Instagram DM webhooks, analyzes, and optionally auto-replies.
-Includes 24h window verification and attachment handling.
+Instagram DM Webhook Handler
+=============================
+Receives ONLY direct webhook events from Meta's Instagram Graph API.
+NOT an N8N forwarding layer — the agent is sovereign.
+
+Respects 24h messaging window before executing replies.
 
 Endpoints:
-  GET  /webhook/dm - Instagram webhook verification
-  POST /webhook/dm - Process incoming DM webhook
+  GET  /webhook/dm - Meta verification challenge
+  POST /webhook/dm - Process incoming DM event
 """
 
 from fastapi import APIRouter, Request

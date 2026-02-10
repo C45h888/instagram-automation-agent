@@ -24,6 +24,7 @@ PUBLIC_PATHS = {
     "/sales-attribution/status",   # Read-only scheduler status
     "/ugc-collection/status",      # Read-only scheduler status
     "/analytics-reports/status",   # Read-only scheduler status
+    "/oversight/status",           # Read-only Oversight Brain health check
 }
 
 

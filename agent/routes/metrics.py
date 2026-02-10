@@ -56,6 +56,12 @@ LLM_ERRORS = Counter(
     ["error_type"],
 )
 
+OVERSIGHT_CHAT_QUERIES = Counter(
+    "agent_oversight_chat_queries_total",
+    "Oversight Brain chat queries by status",
+    ["status"],  # started, success, error
+)
+
 # ================================
 # Engagement Monitor Metrics
 # ================================

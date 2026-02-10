@@ -41,11 +41,6 @@ from tools.analytics_tools import (
     generate_llm_insights,
     build_report,
 )
-from routes.metrics import (
-    ANALYTICS_REPORT_RUNS,
-    ANALYTICS_REPORTS_GENERATED,
-    ANALYTICS_REPORT_DURATION,
-)
 
 
 async def analytics_reports_run(report_type: str = "daily"):
@@ -54,6 +49,11 @@ async def analytics_reports_run(report_type: str = "daily"):
     Args:
         report_type: "daily" or "weekly"
     """
+    from routes.metrics import (
+        ANALYTICS_REPORT_RUNS,
+        ANALYTICS_REPORT_DURATION,
+    )
+
     run_id = str(uuid4())
     logger.info(f"[{run_id}] Analytics reports cycle starting (type={report_type})")
     start_time = time.time()
@@ -201,6 +201,7 @@ async def _process_account(
 
     if saved:
         stats["saved"] = 1
+        from routes.metrics import ANALYTICS_REPORTS_GENERATED
         ANALYTICS_REPORTS_GENERATED.labels(report_type=report_type).inc()
 
         # 8. Log decision to audit trail

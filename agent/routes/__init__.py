@@ -1,7 +1,4 @@
 from .health import health_router
-from .approve_comment import approve_comment_router
-from .approve_dm import approve_dm_router
-from .approve_post import approve_post_router
 from .metrics import metrics_router
 from .webhook_comment import webhook_comment_router
 from .webhook_dm import webhook_dm_router
@@ -12,3 +9,4 @@ from .webhook_order import webhook_order_router
 from .attribution_routes import attribution_router
 from .ugc_collection_routes import ugc_collection_router
 from .analytics_routes import analytics_router
+from .oversight import oversight_router

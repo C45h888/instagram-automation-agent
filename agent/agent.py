@@ -12,9 +12,6 @@ learning for proactive automation.
 Endpoints:
   GET  /health                       - Health check (Ollama + Supabase status)
   GET  /metrics                      - Prometheus metrics
-  POST /approve/comment-reply        - Approve/reject comment reply
-  POST /approve/dm-reply             - Approve/reject DM reply (with escalation)
-  POST /approve/post                 - Approve/reject post caption
   GET  /engagement-monitor/status    - Engagement monitor status
   POST /engagement-monitor/trigger   - Manual trigger
   POST /engagement-monitor/pause     - Pause engagement monitor
@@ -41,11 +38,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED
+from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, limiter
 from middleware import api_key_middleware
 from services.prompt_service import PromptService
 from scheduler.scheduler_service import SchedulerService
@@ -53,9 +48,6 @@ from scheduler.scheduler_service import SchedulerService
 # Import route routers
 from routes import (
     health_router,
-    approve_comment_router,
-    approve_dm_router,
-    approve_post_router,
     metrics_router,
     webhook_comment_router,
     webhook_dm_router,
@@ -66,6 +58,7 @@ from routes import (
     attribution_router,
     ugc_collection_router,
     analytics_router,
+    oversight_router,
 )
 
 
@@ -76,8 +69,7 @@ async def lifespan(app: FastAPI):
     logger.info("Oversight Brain Agent starting up")
     logger.info(f"  Ollama Host: {OLLAMA_HOST}")
     logger.info(f"  Model: {OLLAMA_MODEL}")
-    logger.info(f"  Rate Limit: 60/min global, 30/min on /approve/*, 10/min on /webhook/*")
-    logger.info(f"  Approval Endpoints: /approve/comment-reply, /approve/dm-reply, /approve/post")
+    logger.info(f"  Rate Limit: 60/min global, 10/min on /oversight/chat, 10/min on /webhook/*")
     logger.info(f"  Webhook Endpoints: /webhook/comment, /webhook/dm, /webhook/order-created, /log-outcome")
     logger.info(f"  Scheduler: /engagement-monitor/*, /content-scheduler/*, /sales-attribution/*")
     logger.info(f"  Utility: /health, /metrics")
@@ -92,6 +84,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Weekly Learning: {'enabled' if WEEKLY_LEARNING_ENABLED else 'disabled'}")
     logger.info(f"  UGC Collection: {'enabled' if UGC_COLLECTION_ENABLED else 'disabled'}")
     logger.info(f"  Analytics Reports: {'enabled' if ANALYTICS_REPORTS_ENABLED else 'disabled'}")
+    logger.info(f"  Oversight Brain: /oversight/chat (auth+10/min), /oversight/status (public)")
     yield
     # Shutdown cleanup
     SchedulerService.shutdown()
@@ -99,20 +92,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Oversight Brain Agent",
-    description="Central approval authority for Instagram automation workflows",
+    description="Autonomous Instagram automation agent with explainability via Oversight Brain",
     version="2.0.0",
     lifespan=lifespan,
 )
 
-# --- Rate limiting (Redis-backed for distributed state) ---
-redis_host = os.getenv("REDIS_HOST", "redis")
-redis_port = os.getenv("REDIS_PORT", "6379")
-
-limiter = Limiter(
-    key_func=get_remote_address,
-    storage_uri=f"redis://{redis_host}:{redis_port}",
-    default_limits=["60/minute"],
-)
+# --- Rate limiting (shared Limiter from config.py — Redis-backed) ---
 app.state.limiter = limiter
 
 # --- Middleware: Request ID tracing ---
@@ -131,9 +116,6 @@ app.middleware("http")(api_key_middleware)
 
 # --- Register routers ---
 app.include_router(health_router)
-app.include_router(approve_comment_router)
-app.include_router(approve_dm_router)
-app.include_router(approve_post_router)
 app.include_router(metrics_router)
 app.include_router(webhook_comment_router)
 app.include_router(webhook_dm_router)
@@ -144,6 +126,7 @@ app.include_router(webhook_order_router)
 app.include_router(attribution_router)
 app.include_router(ugc_collection_router)
 app.include_router(analytics_router)
+app.include_router(oversight_router)
 
 
 # ================================
@@ -156,7 +139,7 @@ def _get_request_id(request: Request) -> str:
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception(request: Request, exc: RequestValidationError):
-    """Override FastAPI's default 422 to return 400 for N8N backward compatibility."""
+    """Override FastAPI's default 422 to return 400 for consistent client error handling."""
     request_id = _get_request_id(request)
     return JSONResponse(
         status_code=400,

@@ -1,11 +1,14 @@
 """
-Comment Webhook Route
-======================
-Receives Instagram comment webhooks, analyzes, and optionally auto-replies.
+Instagram Comment Webhook Handler
+===================================
+Receives ONLY direct webhook events from Meta's Instagram Graph API.
+NOT an N8N forwarding layer — the agent is sovereign.
+
+Flow: Instagram → HMAC-verified POST → analyze → auto-reply → audit_log
 
 Endpoints:
-  GET  /webhook/comment - Instagram webhook verification
-  POST /webhook/comment - Process incoming comment webhook
+  GET  /webhook/comment - Meta verification challenge
+  POST /webhook/comment - Process incoming comment event
 """
 
 from fastapi import APIRouter, Request

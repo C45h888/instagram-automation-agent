@@ -2,7 +2,7 @@
 Shared Webhook Pipeline
 ========================
 Generic hook-based pipeline for Instagram webhook processing.
-Similar to approve_base.py but handles the full analyze->decide->execute flow.
+Handles the full analyze->decide->execute flow for direct Instagram events.
 
 Features:
 - HMAC-SHA256 signature verification

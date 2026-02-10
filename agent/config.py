@@ -126,13 +126,22 @@ BACKEND_REPLY_DM_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/reply-dm"
 # ================================
 BACKEND_TIMEOUT_SECONDS = 8.0
 WEBHOOK_RATE_LIMIT = "10/minute"
+OVERSIGHT_RATE_LIMIT = "10/minute"  # Oversight LLM calls are expensive; protect Ollama CPU
 
 # ================================
-# Approval Thresholds & Constants
+# Rate Limiter (shared instance — import in routes for @limiter.limit())
 # ================================
-COMMENT_APPROVAL_THRESHOLD = 0.75
-DM_APPROVAL_THRESHOLD = 0.75
-POST_APPROVAL_THRESHOLD = 0.72
+from slowapi import Limiter
+from slowapi.util import get_remote_address as _get_remote_address
+
+_redis_host = os.getenv("REDIS_HOST", "redis")
+_redis_port = os.getenv("REDIS_PORT", "6379")
+
+limiter = Limiter(
+    key_func=_get_remote_address,
+    storage_uri=f"redis://{_redis_host}:{_redis_port}",
+    default_limits=["60/minute"],
+)
 
 MAX_DM_REPLY_LENGTH = 150
 MAX_CAPTION_LENGTH = 2200
