@@ -55,6 +55,20 @@ class AgentService:
         async with _llm_semaphore:
             return await self._analyze(prompt)
 
+    async def astream_analyze(self, prompt: str):
+        """Async streaming entry point with semaphore-limited concurrency.
+
+        Yields raw text chunks from the LLM.
+        Tool execution happens in the non-streaming first pass (if tools called).
+        Final answer generation is streamed.
+
+        Yields:
+            str: Text chunks from the LLM response
+        """
+        async with _llm_semaphore:
+            async for chunk in self._astream(prompt):
+                yield chunk
+
     async def _analyze(self, prompt: str) -> dict:
         """Async LLM invocation with parallel tool execution.
 
@@ -105,6 +119,51 @@ class AgentService:
                 "message": str(e),
                 "_latency_ms": latency_ms,
             }
+
+    async def _astream(self, prompt: str):
+        """Async streaming LLM invocation with tool support.
+
+        Flow:
+          1. Non-streaming invoke to detect tool calls
+          2. If tools called, execute them, then stream follow-up
+          3. If no tools, stream directly (yield the already-complete initial response)
+        """
+        start_time = time.time()
+
+        try:
+            # Prepend system prompt for consistent behavior
+            full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+
+            # Step 1: Initial invoke (non-streaming) to detect tool calls
+            result = await asyncio.to_thread(self.llm_with_tools.invoke, full_prompt)
+            tool_calls = getattr(result, "tool_calls", [])
+
+            # Step 2: Execute tool calls in parallel if any
+            tool_outputs = {}
+            if tool_calls:
+                tool_outputs = await self._execute_tool_calls_async(tool_calls)
+
+                # If tools were called, stream the follow-up with tool context
+                if tool_outputs:
+                    enriched_prompt = self._build_enriched_prompt(full_prompt, tool_outputs)
+                    async for chunk in self.llm_with_tools.astream(enriched_prompt):
+                        text = chunk.content if hasattr(chunk, "content") else str(chunk)
+                        if text:
+                            yield text
+                    return
+
+            # Step 3: No tools -- yield the already-completed initial response
+            raw_text = result.content if hasattr(result, "content") else str(result)
+            yield raw_text
+
+        except Exception as e:
+            latency_ms = int((time.time() - start_time) * 1000)
+            logger.error(f"AgentService stream failed (latency={latency_ms}ms): {e}")
+            LLM_ERRORS.labels(error_type="agent_stream_failed").inc()
+            yield json.dumps({
+                "error": "agent_stream_failed",
+                "message": str(e),
+            })
 
     async def _execute_tool_calls_async(self, tool_calls: list) -> dict:
         """Execute tool calls in parallel with timeout handling.

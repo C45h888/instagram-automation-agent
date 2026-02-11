@@ -19,6 +19,7 @@ class AuditLogQueryInput(BaseModel):
     resource_id: Optional[str] = Field(None, description="Filter by resource UUID (comment_id, post_id, etc.)")
     event_type: Optional[str] = Field(None, description="Filter by event type (e.g. 'webhook_comment_processed')")
     date_from: Optional[str] = Field(None, description="ISO date string e.g. '2026-02-01'")
+    business_account_id: Optional[str] = Field(None, description="Filter by business account UUID (matches user_id in audit_log)")
     limit: int = Field(default=10, ge=1, le=50, description="Max results to return")
 
 
@@ -33,11 +34,18 @@ def _get_audit_log_entries(
     resource_id: Optional[str] = None,
     event_type: Optional[str] = None,
     date_from: Optional[str] = None,
+    business_account_id: Optional[str] = None,
     limit: int = 10,
 ) -> list:
     """Query audit_log for decision history."""
-    from services.supabase_service import _execute_query
+    from services.supabase_service import _execute_query, _cache_get, _cache_set
     from config import supabase
+
+    # Build cache key from all filter params
+    cache_key = f"oversight:audit:{resource_id}:{event_type}:{date_from}:{business_account_id}:{limit}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     query = supabase.table("audit_log").select(
         "id,event_type,action,resource_type,resource_id,details,created_at"
@@ -48,19 +56,29 @@ def _get_audit_log_entries(
         query = query.eq("event_type", event_type)
     if date_from:
         query = query.gte("created_at", date_from)
+    if business_account_id:
+        query = query.eq("user_id", business_account_id)
 
     result = _execute_query(
         query.order("created_at", desc=True).limit(limit),
         table="audit_log",
         operation="select",
     )
-    return result.data or []
+    result_data = result.data or []
+    _cache_set(cache_key, result_data, ttl=45)
+    return result_data
 
 
 def _get_run_summary(run_id: str) -> dict:
     """Get summary statistics for a scheduler run by run_id."""
-    from services.supabase_service import _execute_query
+    from services.supabase_service import _execute_query, _cache_get, _cache_set
     from config import supabase
+
+    # Build cache key
+    cache_key = f"oversight:run:{run_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     result = _execute_query(
         supabase.table("audit_log")
@@ -81,7 +99,7 @@ def _get_run_summary(run_id: str) -> dict:
         event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
         action_counts[e["action"]] = action_counts.get(e["action"], 0) + 1
 
-    return {
+    summary = {
         "run_id": run_id,
         "total_entries": len(entries),
         "event_types": event_counts,
@@ -89,6 +107,8 @@ def _get_run_summary(run_id: str) -> dict:
         "started_at": entries[0]["created_at"],
         "finished_at": entries[-1]["created_at"],
     }
+    _cache_set(cache_key, summary, ttl=45)
+    return summary
 
 
 # ================================

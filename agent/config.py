@@ -126,7 +126,14 @@ BACKEND_REPLY_DM_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/reply-dm"
 # ================================
 BACKEND_TIMEOUT_SECONDS = 8.0
 WEBHOOK_RATE_LIMIT = "10/minute"
-OVERSIGHT_RATE_LIMIT = "10/minute"  # Oversight LLM calls are expensive; protect Ollama CPU
+OVERSIGHT_RATE_LIMIT = "20/minute"  # per-user rate limit (was 10/minute per-IP)
+
+# ================================
+# Oversight Brain (Enhanced)
+# ================================
+OVERSIGHT_STREAM_ENABLED = os.getenv("OVERSIGHT_STREAM_ENABLED", "true").lower() == "true"
+OVERSIGHT_AUTO_CONTEXT_LIMIT = int(os.getenv("OVERSIGHT_AUTO_CONTEXT_LIMIT", "12"))
+OVERSIGHT_LLM_TIMEOUT_SECONDS = int(os.getenv("OVERSIGHT_LLM_TIMEOUT_SECONDS", "15"))
 
 # ================================
 # Rate Limiter (shared instance — import in routes for @limiter.limit())

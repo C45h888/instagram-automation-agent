@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
     logger.info("Oversight Brain Agent starting up")
     logger.info(f"  Ollama Host: {OLLAMA_HOST}")
     logger.info(f"  Model: {OLLAMA_MODEL}")
-    logger.info(f"  Rate Limit: 60/min global, 10/min on /oversight/chat, 10/min on /webhook/*")
+    logger.info(f"  Rate Limit: 60/min global, 20/min on /oversight/chat (per-user), 10/min on /webhook/*")
     logger.info(f"  Webhook Endpoints: /webhook/comment, /webhook/dm, /webhook/order-created, /log-outcome")
     logger.info(f"  Scheduler: /engagement-monitor/*, /content-scheduler/*, /sales-attribution/*")
     logger.info(f"  Utility: /health, /metrics")
@@ -84,7 +84,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Weekly Learning: {'enabled' if WEEKLY_LEARNING_ENABLED else 'disabled'}")
     logger.info(f"  UGC Collection: {'enabled' if UGC_COLLECTION_ENABLED else 'disabled'}")
     logger.info(f"  Analytics Reports: {'enabled' if ANALYTICS_REPORTS_ENABLED else 'disabled'}")
-    logger.info(f"  Oversight Brain: /oversight/chat (auth+10/min), /oversight/status (public)")
+    from config import OVERSIGHT_STREAM_ENABLED, OVERSIGHT_RATE_LIMIT
+    logger.info(f"  Oversight Brain: /oversight/chat (auth+{OVERSIGHT_RATE_LIMIT}/user), /oversight/status (public), streaming={'enabled' if OVERSIGHT_STREAM_ENABLED else 'disabled'}")
     yield
     # Shutdown cleanup
     SchedulerService.shutdown()
