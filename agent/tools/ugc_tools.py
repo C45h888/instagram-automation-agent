@@ -27,6 +27,7 @@ from config import (
     UGC_COLLECTION_PRODUCT_KEYWORDS,
     UGC_COLLECTION_HIGH_QUALITY_THRESHOLD,
     UGC_COLLECTION_MODERATE_QUALITY_THRESHOLD,
+    backend_headers,
 )
 
 
@@ -111,7 +112,7 @@ def _call_backend_search_hashtag(payload: dict) -> dict:
         response = client.post(
             BACKEND_SEARCH_HASHTAG_ENDPOINT,
             json=payload,
-            headers={"Content-Type": "application/json"},
+            headers=backend_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -153,7 +154,7 @@ def _call_backend_get_tags(params: dict) -> dict:
         response = client.get(
             BACKEND_GET_TAGS_ENDPOINT,
             params=params,
-            headers={"Content-Type": "application/json"},
+            headers=backend_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -208,7 +209,7 @@ def _call_backend_send_dm(payload: dict) -> dict:
         response = client.post(
             BACKEND_SEND_DM_ENDPOINT,
             json=payload,
-            headers={"Content-Type": "application/json"},
+            headers=backend_headers(),
         )
         response.raise_for_status()
         return response.json()

@@ -31,6 +31,7 @@ from config import (
     MAX_CAPTION_LENGTH,
     MAX_HASHTAG_COUNT,
     CONTENT_SCHEDULER_MAX_ASSETS_TO_SCORE,
+    backend_headers,
 )
 from services.supabase_service import SupabaseService
 
@@ -371,7 +372,7 @@ def _call_backend_publish(payload: dict) -> dict:
         response = client.post(
             BACKEND_PUBLISH_POST_ENDPOINT,
             json=payload,
-            headers={"Content-Type": "application/json"},
+            headers=backend_headers(),
         )
         response.raise_for_status()
         return response.json()

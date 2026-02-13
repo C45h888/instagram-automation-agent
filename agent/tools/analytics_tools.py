@@ -25,6 +25,7 @@ from config import (
     BACKEND_MEDIA_INSIGHTS_ENDPOINT,
     BACKEND_TIMEOUT_SECONDS,
     ANALYTICS_LLM_INSIGHTS_ENABLED,
+    backend_headers,
 )
 
 
@@ -55,6 +56,7 @@ def _call_backend_account_insights(business_account_id: str, since: str, until: 
                 "since": since,
                 "until": until,
             },
+            headers=backend_headers(),
         )
         response.raise_for_status()
         return response.json()
@@ -71,6 +73,7 @@ def _call_backend_media_insights(business_account_id: str, since: str, until: st
                 "since": since,
                 "until": until,
             },
+            headers=backend_headers(),
         )
         response.raise_for_status()
         return response.json()

@@ -25,6 +25,7 @@ from config import (
     ESCALATION_CATEGORIES,
     URGENT_KEYWORDS,
     VIP_LIFETIME_VALUE_THRESHOLD,
+    backend_headers,
 )
 
 
@@ -177,7 +178,7 @@ def _call_backend_reply_comment(payload: dict) -> dict:
         response = client.post(
             BACKEND_REPLY_COMMENT_ENDPOINT,
             json=payload,
-            headers={"Content-Type": "application/json"}
+            headers=backend_headers()
         )
         response.raise_for_status()
         return response.json()
@@ -233,7 +234,7 @@ def _call_backend_reply_dm(payload: dict) -> dict:
         response = client.post(
             BACKEND_REPLY_DM_ENDPOINT,
             json=payload,
-            headers={"Content-Type": "application/json"}
+            headers=backend_headers()
         )
         response.raise_for_status()
         return response.json()

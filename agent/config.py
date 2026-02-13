@@ -121,6 +121,41 @@ BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://localhost:3001")
 BACKEND_REPLY_COMMENT_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/reply-comment"
 BACKEND_REPLY_DM_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/reply-dm"
 
+
+def backend_headers() -> dict:
+    """Standard headers for all backend proxy calls."""
+    h = {"Content-Type": "application/json"}
+    if AGENT_API_KEY:
+        h["X-API-Key"] = AGENT_API_KEY
+    return h
+
+
+# ================================
+# CORS
+# ================================
+# Allowed browser origins. In production set CORS_ALLOW_ORIGINS as comma-separated URLs.
+#
+# Docker port mappings (from docker-compose.yml):
+#   Frontend  : http://localhost:8080  (nginx container port 80 → host port 8080)
+#   Backend   : http://localhost:3001  (direct map)
+#   Agent     : http://localhost:3002  (direct map, service name: langchain-agent)
+#
+# Docker-internal names (container-to-container, server-side — no CORS check from browser):
+#   backend → agent : http://langchain-agent:3002
+#
+# Production:
+#   Frontend app : https://app.888intelligenceautomation.in
+#   Backend API  : https://api.888intelligenceautomation.in
+_cors_env = os.getenv(
+    "CORS_ALLOW_ORIGINS",
+    "https://app.888intelligenceautomation.in,"
+    "https://api.888intelligenceautomation.in,"
+    "http://localhost:8080,"     # Docker: frontend nginx (8080:80)
+    "http://localhost:3001,"     # Docker: backend mapped port
+    "http://localhost:3002",     # Docker: agent mapped port (direct curl / test clients)
+)
+CORS_ALLOW_ORIGINS: list[str] = [o.strip() for o in _cors_env.split(",") if o.strip()]
+
 # ================================
 # Timeouts & Resilience
 # ================================

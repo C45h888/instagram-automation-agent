@@ -37,10 +37,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
-from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, limiter
+from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, limiter, CORS_ALLOW_ORIGINS
 from middleware import api_key_middleware
 from services.prompt_service import PromptService
 from scheduler.scheduler_service import SchedulerService
@@ -70,6 +71,7 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Ollama Host: {OLLAMA_HOST}")
     logger.info(f"  Model: {OLLAMA_MODEL}")
     logger.info(f"  Rate Limit: 60/min global, 20/min on /oversight/chat (per-user), 10/min on /webhook/*")
+    logger.info(f"  CORS Origins: {CORS_ALLOW_ORIGINS}")
     logger.info(f"  Webhook Endpoints: /webhook/comment, /webhook/dm, /webhook/order-created, /log-outcome")
     logger.info(f"  Scheduler: /engagement-monitor/*, /content-scheduler/*, /sales-attribution/*")
     logger.info(f"  Utility: /health, /metrics")
@@ -96,6 +98,16 @@ app = FastAPI(
     description="Autonomous Instagram automation agent with explainability via Oversight Brain",
     version="2.0.0",
     lifespan=lifespan,
+)
+
+# --- CORS (must be first middleware — handles OPTIONS preflight before auth) ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["X-API-Key", "X-User-ID", "Content-Type", "Authorization"],
+    expose_headers=["X-Request-ID"],          # Allow clients to read request tracing header
 )
 
 # --- Rate limiting (shared Limiter from config.py — Redis-backed) ---
