@@ -188,6 +188,7 @@ limiter = Limiter(
 )
 
 MAX_DM_REPLY_LENGTH = 150
+MAX_COMMENT_REPLY_LENGTH = 2200   # Instagram's actual limit (matches backend validation)
 MAX_CAPTION_LENGTH = 2200
 MAX_HASHTAG_COUNT = 10
 POST_APPROVAL_THRESHOLD = float(os.getenv("POST_APPROVAL_THRESHOLD", "0.6"))
@@ -241,6 +242,7 @@ UGC_COLLECTION_MAX_CONCURRENT_ACCOUNTS = int(os.getenv("UGC_COLLECTION_MAX_CONCU
 UGC_COLLECTION_HIGH_QUALITY_THRESHOLD = int(os.getenv("UGC_COLLECTION_HIGH_QUALITY_THRESHOLD", "70"))
 UGC_COLLECTION_MODERATE_QUALITY_THRESHOLD = int(os.getenv("UGC_COLLECTION_MODERATE_QUALITY_THRESHOLD", "41"))
 UGC_COLLECTION_AUTO_SEND_DM = os.getenv("UGC_COLLECTION_AUTO_SEND_DM", "false").lower() == "true"
+UGC_COLLECTION_AUTO_REPOST = os.getenv("UGC_COLLECTION_AUTO_REPOST", "false").lower() == "true"
 UGC_COLLECTION_PRODUCT_KEYWORDS = os.getenv(
     "UGC_COLLECTION_PRODUCT_KEYWORDS",
     "wearing,styled,love my,obsessed with,favorite"
@@ -284,3 +286,10 @@ ANALYTICS_LLM_INSIGHTS_ENABLED = os.getenv("ANALYTICS_LLM_INSIGHTS_ENABLED", "fa
 
 # Backend analytics proxy endpoint (unified: ?metric_type=account|media)
 BACKEND_INSIGHTS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/insights"
+
+# Live fetch endpoints (fallback when Supabase is empty/stale)
+BACKEND_POST_COMMENTS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/post-comments"
+BACKEND_CONVERSATIONS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/conversations"
+BACKEND_CONVERSATION_MESSAGES_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/conversation-messages"
+BACKEND_REPOST_UGC_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/repost-ugc"
+BACKEND_SYNC_UGC_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/sync-ugc"

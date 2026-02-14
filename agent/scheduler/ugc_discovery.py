@@ -37,6 +37,7 @@ from config import (
     UGC_COLLECTION_MAX_POSTS_PER_HASHTAG,
     UGC_COLLECTION_MAX_TAGGED_POSTS,
     UGC_COLLECTION_AUTO_SEND_DM,
+    UGC_COLLECTION_AUTO_REPOST,
 )
 from services.supabase_service import SupabaseService
 from scheduler.ugc_dedup_service import UgcDedupService
@@ -257,6 +258,33 @@ async def _process_account(run_id: str, account: dict) -> dict:
             stats["errors"] += 1
 
     logger.info(f"[{run_id}] @{account_username}: {stats}")
+
+    # End-of-run: sync tagged posts from Graph API into ugc_discovered via backend
+    from tools.live_fetch_tools import trigger_sync_ugc
+    sync_result = await trigger_sync_ugc(account_id)
+    logger.info(
+        f"[{run_id}] @{account_username}: UGC sync complete "
+        f"({sync_result.get('synced_count', 0)} records synced)"
+    )
+
+    # Auto-repost: check for newly-granted permissions and publish (if enabled)
+    if UGC_COLLECTION_AUTO_REPOST:
+        from tools.live_fetch_tools import trigger_repost_ugc
+        granted_permissions = SupabaseService.get_granted_ugc_permissions(account_id)
+        for perm in granted_permissions:
+            repost_result = await trigger_repost_ugc(account_id, perm["id"])
+            if repost_result.get("success"):
+                stats["reposted"] = stats.get("reposted", 0) + 1
+                logger.info(
+                    f"[{run_id}] @{account_username}: reposted UGC "
+                    f"(permission_id={perm['id']}, media_id={repost_result.get('id')})"
+                )
+            else:
+                logger.warning(
+                    f"[{run_id}] @{account_username}: repost failed "
+                    f"(permission_id={perm['id']}): {repost_result.get('error')}"
+                )
+
     return stats
 
 

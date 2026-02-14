@@ -629,6 +629,216 @@ class SupabaseService:
             return {}
 
     # --------------------------------------------------
+    # READ: Recent Media IDs (Live Fetch Fallback)
+    # --------------------------------------------------
+    @staticmethod
+    def get_recent_media_ids(business_account_id: str, limit: int = 10) -> list:
+        """Fetch recent media with both Supabase UUID and Instagram media ID.
+
+        Used by engagement_monitor fallback to know which posts to poll for live comments.
+        Returns: [{"id": supabase_uuid, "instagram_media_id": "..."}]
+        """
+        if not supabase or not business_account_id:
+            return []
+        try:
+            result = _execute_query(
+                supabase.table("instagram_media")
+                .select("id, instagram_media_id")
+                .eq("business_account_id", business_account_id)
+                .order("published_at", desc=True)
+                .limit(limit),
+                table="instagram_media",
+                operation="select"
+            )
+            return result.data or []
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping get_recent_media_ids")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to fetch recent media ids for {business_account_id}: {e}")
+            return []
+
+    # --------------------------------------------------
+    # WRITE: Save Live Comments (Live Fetch Write-Through)
+    # --------------------------------------------------
+    @staticmethod
+    def save_live_comments(comments: list, business_account_id: str, media_id: str) -> int:
+        """Upsert live comments (from /post-comments backend proxy) into instagram_comments.
+
+        Args:
+            comments: list of dicts from /post-comments response data[]
+                      fields: id, text, timestamp, username, like_count, replies_count
+            media_id: Supabase UUID for instagram_media FK (NOT instagram_media_id)
+        Returns count upserted.
+        """
+        if not supabase or not comments:
+            return 0
+        records = [
+            {
+                "instagram_comment_id": c["id"],
+                "text": c.get("text", ""),
+                "author_username": c.get("username", ""),
+                "author_instagram_id": None,        # not returned by /post-comments
+                "media_id": media_id,               # Supabase UUID FK
+                "business_account_id": business_account_id,
+                "created_at": c.get("timestamp"),
+                "like_count": c.get("like_count", 0) or 0,
+                "processed_by_automation": False,   # fresh — not yet processed
+            }
+            for c in comments if c.get("id")
+        ]
+        if not records:
+            return 0
+        try:
+            result = _execute_query(
+                supabase.table("instagram_comments")
+                .upsert(records, on_conflict="instagram_comment_id"),
+                table="instagram_comments",
+                operation="upsert"
+            )
+            return len(result.data or [])
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to save live comments")
+            return 0
+        except Exception as e:
+            logger.error(f"Failed to save live comments: {e}")
+            return 0
+
+    # --------------------------------------------------
+    # WRITE: Save Live Conversations (Live Fetch Write-Through)
+    # --------------------------------------------------
+    @staticmethod
+    def save_live_conversations(conversations: list, business_account_id: str) -> int:
+        """Upsert DM conversations (from /conversations backend proxy) into instagram_dm_conversations.
+
+        Args:
+            conversations: list of dicts from /conversations response data[]
+                           fields: id, participants, last_message_at, message_count, messaging_window
+        Returns count upserted.
+        """
+        from datetime import timedelta
+        if not supabase or not conversations:
+            return 0
+        now = datetime.now(timezone.utc)
+        records = []
+        for conv in conversations:
+            participants = conv.get("participants", [])
+            customer_id = participants[0]["id"] if participants else None
+            if not customer_id:
+                continue
+            mw = conv.get("messaging_window", {})
+            is_open = mw.get("is_open", False)
+            hours_rem = mw.get("hours_remaining")
+            window_expires_at = (
+                (now + timedelta(hours=hours_rem)).isoformat()
+                if is_open and hours_rem is not None else None
+            )
+            records.append({
+                "customer_instagram_id": customer_id,
+                "business_account_id": business_account_id,
+                "conversation_id": conv["id"],
+                "within_window": is_open,
+                "window_expires_at": window_expires_at,
+                "last_message_at": conv.get("last_message_at"),
+                "message_count": conv.get("message_count", 0) or 0,
+                "conversation_status": "open",
+            })
+        if not records:
+            return 0
+        try:
+            result = _execute_query(
+                supabase.table("instagram_dm_conversations")
+                .upsert(records, on_conflict="customer_instagram_id,business_account_id"),
+                table="instagram_dm_conversations",
+                operation="upsert"
+            )
+            return len(result.data or [])
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to save live conversations")
+            return 0
+        except Exception as e:
+            logger.error(f"Failed to save live conversations: {e}")
+            return 0
+
+    # --------------------------------------------------
+    # WRITE: Save Live Conversation Messages (Live Fetch Write-Through)
+    # --------------------------------------------------
+    @staticmethod
+    def save_live_conversation_messages(
+        messages: list,
+        conversation_id: str,
+        business_account_id: str,
+        business_ig_user_id: str,
+    ) -> int:
+        """Upsert DM messages (from /conversation-messages backend proxy) into instagram_dm_messages.
+
+        Args:
+            messages: list of dicts — fields: id, message, from{id,username}, created_time
+            business_ig_user_id: Instagram numeric user ID of the business account
+                                 Used to determine is_from_business flag.
+        Returns count upserted.
+        """
+        if not supabase or not messages:
+            return 0
+        records = [
+            {
+                "message_id": m["id"],
+                "message_text": m.get("message", ""),
+                "conversation_id": conversation_id,
+                "business_account_id": business_account_id,
+                "is_from_business": m.get("from", {}).get("id") == business_ig_user_id,
+                "sent_at": m.get("created_time"),
+                "send_status": "received",
+            }
+            for m in messages if m.get("id")
+        ]
+        if not records:
+            return 0
+        try:
+            result = _execute_query(
+                supabase.table("instagram_dm_messages")
+                .upsert(records, on_conflict="message_id"),
+                table="instagram_dm_messages",
+                operation="upsert"
+            )
+            return len(result.data or [])
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to save live conversation messages")
+            return 0
+        except Exception as e:
+            logger.error(f"Failed to save live conversation messages: {e}")
+            return 0
+
+    # --------------------------------------------------
+    # READ: Granted UGC Permissions (UGC Auto-Repost)
+    # --------------------------------------------------
+    @staticmethod
+    def get_granted_ugc_permissions(business_account_id: str) -> list:
+        """Fetch ugc_permissions with status='granted' not yet reposted.
+
+        The backend /repost-ugc sets status='reposted' after publish,
+        so filtering on 'granted' naturally excludes already-reposted records.
+        """
+        if not supabase or not business_account_id:
+            return []
+        try:
+            result = _execute_query(
+                supabase.table("ugc_permissions")
+                .select("id, ugc_discovered_id, username")
+                .eq("business_account_id", business_account_id)
+                .eq("status", "granted"),
+                table="ugc_permissions",
+                operation="select"
+            )
+            return result.data or []
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping get_granted_ugc_permissions")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to fetch granted UGC permissions: {e}")
+            return []
+
+    # --------------------------------------------------
     # READ: Eligible Assets (Content Scheduler)
     # --------------------------------------------------
     @staticmethod

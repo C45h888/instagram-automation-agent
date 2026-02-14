@@ -38,7 +38,7 @@ def _oversight_rate_key(request: Request) -> str:
 # Request Model
 # ================================
 class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=10, max_length=2000, description="Question about an agent decision")
+    question: str = Field(..., min_length=1, max_length=2000, description="Question about an agent decision")
     business_account_id: str = Field(..., min_length=1, description="Business account UUID for scoping")
     stream: bool = Field(default=False, description="If true, return SSE stream")
     chat_history: Optional[list] = Field(default=None, description="Prior turns [{role, content}]")

@@ -25,6 +25,7 @@ from config import (
     ESCALATION_CATEGORIES,
     URGENT_KEYWORDS,
     VIP_LIFETIME_VALUE_THRESHOLD,
+    MAX_COMMENT_REPLY_LENGTH,
     backend_headers,
 )
 
@@ -44,7 +45,7 @@ class AnalyzeMessageInput(BaseModel):
 
 class ReplyToCommentInput(BaseModel):
     comment_id: str = Field(description="Instagram comment ID")
-    reply_text: str = Field(description="Reply text (max 200 chars)")
+    reply_text: str = Field(description="Reply text (max 2200 chars)")
     business_account_id: str = Field(description="Business account UUID")
     post_id: str = Field(description="Instagram media ID")
 
@@ -191,12 +192,12 @@ def _reply_to_comment(
     post_id: str,
 ) -> dict:
     """Execute comment reply via backend proxy with timeout and retry."""
-    # Validate reply length
-    if len(reply_text) > 200:
+    # Validate reply length against Instagram's limit
+    if len(reply_text) > MAX_COMMENT_REPLY_LENGTH:
         return {
             "success": False,
             "error": "reply_too_long",
-            "message": f"Reply exceeds 200 chars ({len(reply_text)})"
+            "message": f"Reply exceeds {MAX_COMMENT_REPLY_LENGTH} chars ({len(reply_text)})"
         }
 
     payload = {
@@ -293,7 +294,7 @@ analyze_message_tool = StructuredTool.from_function(
 reply_to_comment_tool = StructuredTool.from_function(
     func=_reply_to_comment,
     name="reply_to_comment",
-    description="Send a reply to an Instagram comment via backend proxy. Max 200 chars. Use after analyze_message confirms auto-reply.",
+    description="Send a reply to an Instagram comment via backend proxy. Max 2200 chars. Use after analyze_message confirms auto-reply.",
     args_schema=ReplyToCommentInput,
 )
 

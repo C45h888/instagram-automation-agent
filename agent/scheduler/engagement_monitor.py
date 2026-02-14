@@ -124,6 +124,24 @@ async def _process_account(run_id: str, account: dict) -> dict:
         hours_back=ENGAGEMENT_MONITOR_HOURS_BACK,
     )
 
+    # Fallback: DB has no recent comments → poll live via backend proxy + write-through
+    if not comments:
+        logger.info(f"[{run_id}] @{account_username}: no comments in DB — polling live")
+        from tools.live_fetch_tools import fetch_live_comments
+        media_items = SupabaseService.get_recent_media_ids(account_id, limit=10)
+        for media_item in media_items:
+            await fetch_live_comments(
+                business_account_id=account_id,
+                instagram_media_id=media_item["instagram_media_id"],
+                media_supabase_uuid=media_item["id"],
+            )
+        # Re-query after write-through
+        comments = SupabaseService.get_unprocessed_comments(
+            business_account_id=account_id,
+            limit=ENGAGEMENT_MONITOR_MAX_COMMENTS_PER_RUN,
+            hours_back=ENGAGEMENT_MONITOR_HOURS_BACK,
+        )
+
     if not comments:
         logger.debug(f"[{run_id}] @{account_username}: no unprocessed comments")
         return stats
