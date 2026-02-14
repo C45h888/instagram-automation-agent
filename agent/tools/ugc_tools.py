@@ -217,15 +217,21 @@ def _call_backend_send_dm(payload: dict) -> dict:
 
 def send_permission_dm(
     business_account_id: str,
+    recipient_id: str,
     recipient_username: str,
     message_text: str,
 ) -> dict:
     """Send permission request DM via backend proxy.
 
+    Args:
+        recipient_id: Numeric Instagram user ID (IGSID). Backend requires this.
+        recipient_username: Username for audit context / backend fallback resolution.
+
     Returns {"success": bool, "error": str | None}
     """
     payload = {
         "business_account_id": business_account_id,
+        "recipient_id": recipient_id,
         "recipient_username": recipient_username,
         "message_text": message_text,
     }

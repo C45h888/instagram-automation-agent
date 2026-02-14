@@ -21,8 +21,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import (
     logger,
-    BACKEND_ACCOUNT_INSIGHTS_ENDPOINT,
-    BACKEND_MEDIA_INSIGHTS_ENDPOINT,
+    BACKEND_INSIGHTS_ENDPOINT,
     BACKEND_TIMEOUT_SECONDS,
     ANALYTICS_LLM_INSIGHTS_ENABLED,
     backend_headers,
@@ -50,9 +49,10 @@ def _call_backend_account_insights(business_account_id: str, since: str, until: 
     """Backend proxy call for account-level IG metrics with retry."""
     with httpx.Client(timeout=BACKEND_TIMEOUT_SECONDS) as client:
         response = client.get(
-            BACKEND_ACCOUNT_INSIGHTS_ENDPOINT,
+            BACKEND_INSIGHTS_ENDPOINT,
             params={
                 "business_account_id": business_account_id,
+                "metric_type": "account",
                 "since": since,
                 "until": until,
             },
@@ -67,9 +67,10 @@ def _call_backend_media_insights(business_account_id: str, since: str, until: st
     """Backend proxy call for post-level IG metrics with retry."""
     with httpx.Client(timeout=BACKEND_TIMEOUT_SECONDS) as client:
         response = client.get(
-            BACKEND_MEDIA_INSIGHTS_ENDPOINT,
+            BACKEND_INSIGHTS_ENDPOINT,
             params={
                 "business_account_id": business_account_id,
+                "metric_type": "media",
                 "since": since,
                 "until": until,
             },

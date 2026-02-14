@@ -107,6 +107,7 @@ llm = ChatOllama(
 # Security
 # ================================
 AGENT_API_KEY = os.getenv("AGENT_API_KEY", "")
+AGENT_USER_ID = os.getenv("AGENT_USER_ID", "agent-service")
 
 # ================================
 # Instagram Webhook Security
@@ -127,6 +128,7 @@ def backend_headers() -> dict:
     h = {"Content-Type": "application/json"}
     if AGENT_API_KEY:
         h["X-API-Key"] = AGENT_API_KEY
+    h["X-User-ID"] = AGENT_USER_ID
     return h
 
 
@@ -188,6 +190,7 @@ limiter = Limiter(
 MAX_DM_REPLY_LENGTH = 150
 MAX_CAPTION_LENGTH = 2200
 MAX_HASHTAG_COUNT = 10
+POST_APPROVAL_THRESHOLD = float(os.getenv("POST_APPROVAL_THRESHOLD", "0.6"))
 
 VIP_LIFETIME_VALUE_THRESHOLD = 500.0
 
@@ -279,6 +282,5 @@ ANALYTICS_HISTORICAL_DAYS = int(os.getenv("ANALYTICS_HISTORICAL_DAYS", "30"))
 ANALYTICS_MAX_CONCURRENT_ACCOUNTS = int(os.getenv("ANALYTICS_MAX_CONCURRENT_ACCOUNTS", "3"))
 ANALYTICS_LLM_INSIGHTS_ENABLED = os.getenv("ANALYTICS_LLM_INSIGHTS_ENABLED", "false").lower() == "true"
 
-# Backend analytics proxy endpoints
-BACKEND_ACCOUNT_INSIGHTS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/account-insights"
-BACKEND_MEDIA_INSIGHTS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/media-insights"
+# Backend analytics proxy endpoint (unified: ?metric_type=account|media)
+BACKEND_INSIGHTS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/insights"

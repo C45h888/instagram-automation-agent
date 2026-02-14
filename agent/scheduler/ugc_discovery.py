@@ -349,8 +349,20 @@ def _process_post(run_id: str, post: dict, account: dict) -> dict:
         }
 
         if UGC_COLLECTION_AUTO_SEND_DM:
+            recipient_id = post.get("owner_id", "") or ""
+            if not recipient_id:
+                logger.info(
+                    f"DM skipped for @{post.get('username')} — "
+                    "no numeric owner_id in post data (backend search-hashtag must include owner{id})"
+                )
+                permission_row["status"] = "send_failed"
+                permission_row["send_error"] = "missing_owner_id"
+                result["dm_sent"] = False
+                SupabaseService.create_ugc_permission(permission_row)
+                continue
             dm_result = send_permission_dm(
                 business_account_id=account_id,
+                recipient_id=recipient_id,
                 recipient_username=post.get("username", ""),
                 message_text=dm_text,
             )
