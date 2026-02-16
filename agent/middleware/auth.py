@@ -25,6 +25,7 @@ PUBLIC_PATHS = {
     "/ugc-collection/status",      # Read-only scheduler status
     "/analytics-reports/status",   # Read-only scheduler status
     "/oversight/status",           # Read-only Oversight Brain health check
+    "/queue/status",               # Read-only outbound queue depth
 }
 
 

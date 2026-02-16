@@ -408,19 +408,22 @@ def _process_post(run_id: str, post: dict, account: dict) -> dict:
                     result["dm_sent"] = False
                     SupabaseService.create_ugc_permission(permission_row)
                 else:
-                    dm_result = send_permission_dm(
-                        business_account_id=account_id,
-                        recipient_id=recipient_id,
-                        recipient_username=post.get("username", ""),
-                        message_text=dm_text,
-                    )
-                    if dm_result.get("success"):
-                        permission_row["status"] = "pending"  # DM sent, awaiting reply
-                        result["dm_sent"] = True
+                    # Create permission row first to get the ID for idempotency key
+                    permission_row["status"] = "pending"  # DM queued, worker will send
+                    created = SupabaseService.create_ugc_permission(permission_row)
+                    permission_id = created.get("id", "") if created else ""
+                    if permission_id:
+                        dm_result = send_permission_dm(
+                            business_account_id=account_id,
+                            recipient_id=recipient_id,
+                            recipient_username=post.get("username", ""),
+                            message_text=dm_text,
+                            permission_id=permission_id,
+                        )
+                        result["dm_sent"] = dm_result.get("success", False)
                     else:
-                        permission_row["status"] = "expired"  # send failed — no pending action
+                        logger.warning(f"Skipping DM enqueue — permission row creation failed for @{post.get('username')}")
                         result["dm_sent"] = False
-                    SupabaseService.create_ugc_permission(permission_row)
             else:
                 result["dm_queued"] = True
                 SupabaseService.create_ugc_permission(permission_row)

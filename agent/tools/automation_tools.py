@@ -11,22 +11,19 @@ Tools:
 """
 
 import asyncio
-import httpx
+import uuid as _uuid
+from datetime import datetime, timezone
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 from typing import Optional
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import (
     logger,
-    BACKEND_REPLY_COMMENT_ENDPOINT,
-    BACKEND_REPLY_DM_ENDPOINT,
-    BACKEND_TIMEOUT_SECONDS,
     ESCALATION_CATEGORIES,
     URGENT_KEYWORDS,
     VIP_LIFETIME_VALUE_THRESHOLD,
     MAX_COMMENT_REPLY_LENGTH,
-    backend_headers,
+    MAX_DM_REPLY_LENGTH,
 )
 
 
@@ -170,29 +167,21 @@ def _apply_hard_escalation_rules(result: dict, message_text: str, customer_value
 
 
 # ================================
-# reply_to_comment Implementation (with resilience)
+# reply_to_comment Implementation (queue-first)
 # ================================
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
-def _call_backend_reply_comment(payload: dict) -> dict:
-    """Backend call with retry logic."""
-    with httpx.Client(timeout=BACKEND_TIMEOUT_SECONDS) as client:
-        response = client.post(
-            BACKEND_REPLY_COMMENT_ENDPOINT,
-            json=payload,
-            headers=backend_headers()
-        )
-        response.raise_for_status()
-        return response.json()
-
-
 def _reply_to_comment(
     comment_id: str,
     reply_text: str,
     business_account_id: str,
     post_id: str,
 ) -> dict:
-    """Execute comment reply via backend proxy with timeout and retry."""
-    # Validate reply length against Instagram's limit
+    """Enqueue comment reply job. Returns immediately with queued=True.
+
+    The worker executes the actual HTTP call with 5-retry backoff.
+    Callers check result.get("success") — unchanged contract.
+    """
+    from services.outbound_queue import OutboundQueue
+
     if len(reply_text) > MAX_COMMENT_REPLY_LENGTH:
         return {
             "success": False,
@@ -200,85 +189,70 @@ def _reply_to_comment(
             "message": f"Reply exceeds {MAX_COMMENT_REPLY_LENGTH} chars ({len(reply_text)})"
         }
 
-    payload = {
-        "comment_id": comment_id,
-        "reply_text": reply_text,
+    job = {
+        "job_id": str(_uuid.uuid4()),
+        "action_type": "reply_comment",
+        "priority": "high",
+        "endpoint": "/api/instagram/reply-comment",
+        "payload": {
+            "comment_id": comment_id,
+            "reply_text": reply_text,
+            "business_account_id": business_account_id,
+            "post_id": post_id,
+        },
         "business_account_id": business_account_id,
-        "post_id": post_id,
+        "idempotency_key": f"comment:{comment_id}",
+        "source": "automation_tools",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "retry_count": 0,
+        "max_retries": 5,
+        "last_error": None,
     }
-
-    try:
-        ig_response = _call_backend_reply_comment(payload)
-        return {
-            "success": True,
-            "execution_id": ig_response.get("id", "unknown"),
-            "instagram_response": ig_response,
-        }
-    except httpx.TimeoutException:
-        logger.error(f"Backend timeout for comment {comment_id}")
-        return {"success": False, "error": "timeout", "message": "Backend timed out"}
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Backend error: {e.response.status_code}")
-        return {"success": False, "error": "backend_error", "status_code": e.response.status_code}
-    except Exception as e:
-        logger.error(f"Reply failed: {e}")
-        return {"success": False, "error": str(type(e).__name__), "message": str(e)}
+    return OutboundQueue.enqueue(job)
 
 
 # ================================
-# reply_to_dm Implementation (with resilience)
+# reply_to_dm Implementation (queue-first)
 # ================================
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
-def _call_backend_reply_dm(payload: dict) -> dict:
-    """Backend call with retry logic."""
-    with httpx.Client(timeout=BACKEND_TIMEOUT_SECONDS) as client:
-        response = client.post(
-            BACKEND_REPLY_DM_ENDPOINT,
-            json=payload,
-            headers=backend_headers()
-        )
-        response.raise_for_status()
-        return response.json()
-
-
 def _reply_to_dm(
     conversation_id: str,
     recipient_id: str,
     message_text: str,
     business_account_id: str,
 ) -> dict:
-    """Execute DM reply via backend proxy with timeout and retry."""
-    # Validate message length
-    if len(message_text) > 150:
+    """Enqueue DM reply job. Returns immediately with queued=True.
+
+    Callers check result.get("success") — unchanged contract.
+    """
+    from services.outbound_queue import OutboundQueue
+
+    if len(message_text) > MAX_DM_REPLY_LENGTH:
         return {
             "success": False,
             "error": "message_too_long",
-            "message": f"DM exceeds 150 chars ({len(message_text)})"
+            "message": f"DM exceeds {MAX_DM_REPLY_LENGTH} chars ({len(message_text)})"
         }
 
-    payload = {
-        "conversation_id": conversation_id,
-        "recipient_id": recipient_id,
-        "message_text": message_text,
+    job = {
+        "job_id": str(_uuid.uuid4()),
+        "action_type": "reply_dm",
+        "priority": "high",
+        "endpoint": "/api/instagram/reply-dm",
+        "payload": {
+            "conversation_id": conversation_id,
+            "recipient_id": recipient_id,
+            "message_text": message_text,
+            "business_account_id": business_account_id,
+        },
         "business_account_id": business_account_id,
+        "idempotency_key": f"dm:reply:{recipient_id}:{business_account_id}",
+        "source": "automation_tools",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "retry_count": 0,
+        "max_retries": 5,
+        "last_error": None,
     }
-
-    try:
-        ig_response = _call_backend_reply_dm(payload)
-        return {
-            "success": True,
-            "execution_id": ig_response.get("id", "unknown"),
-            "instagram_response": ig_response,
-        }
-    except httpx.TimeoutException:
-        logger.error(f"Backend timeout for DM to {recipient_id}")
-        return {"success": False, "error": "timeout", "message": "Backend timed out"}
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Backend error: {e.response.status_code}")
-        return {"success": False, "error": "backend_error", "status_code": e.response.status_code}
-    except Exception as e:
-        logger.error(f"DM failed: {e}")
-        return {"success": False, "error": str(type(e).__name__), "message": str(e)}
+    return OutboundQueue.enqueue(job)
 
 
 # ================================

@@ -7,7 +7,7 @@ Import counters from this module in other files to instrument them.
 
 from fastapi import APIRouter
 from fastapi.responses import Response
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 metrics_router = APIRouter()
 
@@ -197,6 +197,46 @@ ANALYTICS_REPORT_DURATION = Histogram(
     "agent_analytics_report_duration_seconds",
     "Duration of analytics report cycle",
     buckets=[5.0, 15.0, 30.0, 60.0, 120.0, 300.0],
+)
+
+# ================================
+# Outbound Queue Metrics
+# ================================
+OUTBOUND_QUEUE_ENQUEUED = Counter(
+    "agent_outbound_queue_enqueued_total",
+    "Jobs enqueued to outbound queue",
+    ["action_type", "backend"],  # backend: redis | supabase | deduplicated
+)
+
+OUTBOUND_QUEUE_EXECUTE = Counter(
+    "agent_outbound_queue_execute_total",
+    "Jobs executed by queue worker",
+    ["action_type", "status"],  # status: success | error | skipped
+)
+
+OUTBOUND_QUEUE_RETRIES = Counter(
+    "agent_outbound_queue_retries_total",
+    "Jobs scheduled for retry",
+    ["action_type"],
+)
+
+OUTBOUND_QUEUE_DLQ = Counter(
+    "agent_outbound_queue_dlq_total",
+    "Jobs moved to dead letter queue",
+    ["action_type"],
+)
+
+OUTBOUND_QUEUE_DEPTH = Gauge(
+    "agent_outbound_queue_depth",
+    "Current queue depth",
+    ["queue"],  # high | normal | scheduled | dlq
+)
+
+OUTBOUND_QUEUE_LATENCY = Histogram(
+    "agent_outbound_queue_job_latency_seconds",
+    "End-to-end job execution latency from enqueue to success",
+    ["action_type"],
+    buckets=[0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0],
 )
 
 

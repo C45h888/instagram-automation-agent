@@ -15,6 +15,9 @@ Functions:
   - send_permission_dm:     Backend proxy: POST /api/instagram/send-dm (with retry)
 """
 
+import uuid as _uuid
+from datetime import datetime, timezone
+
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -22,7 +25,6 @@ from config import (
     logger,
     BACKEND_SEARCH_HASHTAG_ENDPOINT,
     BACKEND_GET_TAGS_ENDPOINT,
-    BACKEND_SEND_DM_ENDPOINT,
     BACKEND_TIMEOUT_SECONDS,
     UGC_COLLECTION_PRODUCT_KEYWORDS,
     UGC_COLLECTION_HIGH_QUALITY_THRESHOLD,
@@ -200,50 +202,47 @@ def compose_dm_message(username: str, brand_username: str, post_permalink: str) 
 
 
 # ================================
-# Backend Proxy: Send DM
+# Backend Proxy: Send DM (Queue-First)
 # ================================
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
-def _call_backend_send_dm(payload: dict) -> dict:
-    """Backend DM send with retry logic."""
-    with httpx.Client(timeout=BACKEND_TIMEOUT_SECONDS) as client:
-        response = client.post(
-            BACKEND_SEND_DM_ENDPOINT,
-            json=payload,
-            headers=backend_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
-
-
 def send_permission_dm(
     business_account_id: str,
     recipient_id: str,
     recipient_username: str,
     message_text: str,
+    permission_id: str,
 ) -> dict:
-    """Send permission request DM via backend proxy.
+    """Enqueue permission request DM via outbound queue (queue-first pattern).
 
     Args:
         recipient_id: Numeric Instagram user ID (IGSID). Backend requires this.
         recipient_username: Username for audit context / backend fallback resolution.
+        permission_id: UUID of the ugc_permissions row (idempotency key).
 
-    Returns {"success": bool, "error": str | None}
+    Returns {"success": bool, "queued": bool, "job_id": str | None, "error": str | None}
     """
-    payload = {
+    from services.outbound_queue import OutboundQueue
+
+    job = {
+        "job_id": str(_uuid.uuid4()),
+        "action_type": "send_permission_dm",
+        "priority": "normal",
+        "endpoint": "/api/instagram/send-dm",
+        "payload": {
+            "business_account_id": business_account_id,
+            "recipient_id": recipient_id,
+            "recipient_username": recipient_username,
+            "message_text": message_text,
+            "permission_id": permission_id,
+        },
         "business_account_id": business_account_id,
-        "recipient_id": recipient_id,
-        "recipient_username": recipient_username,
-        "message_text": message_text,
+        "idempotency_key": f"dm:permission:{recipient_id}:{business_account_id}",
+        "source": "ugc_discovery",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "retry_count": 0,
+        "max_retries": 5,
     }
-    try:
-        result = _call_backend_send_dm(payload)
-        return {"success": True, "response": result}
-    except httpx.TimeoutException:
-        logger.error(f"Backend timeout sending DM to {recipient_username}")
-        return {"success": False, "error": "timeout"}
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Backend error sending DM: {e.response.status_code}")
-        return {"success": False, "error": f"http_{e.response.status_code}"}
-    except Exception as e:
-        logger.error(f"DM send failed: {e}")
-        return {"success": False, "error": str(e)}
+
+    result = OutboundQueue.enqueue(job)
+    if not result.get("success"):
+        logger.error(f"Failed to enqueue permission DM for {recipient_username}: {result.get('error')}")
+    return result

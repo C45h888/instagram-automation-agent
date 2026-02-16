@@ -21,6 +21,8 @@ Functions:
 """
 
 import asyncio
+import uuid as _uuid
+from datetime import datetime, timezone
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -30,8 +32,6 @@ from config import (
     BACKEND_POST_COMMENTS_ENDPOINT,
     BACKEND_CONVERSATIONS_ENDPOINT,
     BACKEND_CONVERSATION_MESSAGES_ENDPOINT,
-    BACKEND_REPOST_UGC_ENDPOINT,
-    BACKEND_SYNC_UGC_ENDPOINT,
     BACKEND_TIMEOUT_SECONDS,
     backend_headers,
 )
@@ -98,33 +98,6 @@ def _call_backend_conversation_messages(
         return response.json()
 
 
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
-def _call_backend_repost_ugc(business_account_id: str, permission_id: str) -> dict:
-    """Backend proxy to repost UGC after permission is granted."""
-    with httpx.Client(timeout=BACKEND_TIMEOUT_SECONDS) as client:
-        response = client.post(
-            BACKEND_REPOST_UGC_ENDPOINT,
-            json={
-                "business_account_id": business_account_id,
-                "permission_id": permission_id,
-            },
-            headers=backend_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
-
-
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
-def _call_backend_sync_ugc(business_account_id: str) -> dict:
-    """Backend proxy to sync tagged posts from Graph API into ugc_discovered."""
-    with httpx.Client(timeout=BACKEND_TIMEOUT_SECONDS) as client:
-        response = client.post(
-            BACKEND_SYNC_UGC_ENDPOINT,
-            json={"business_account_id": business_account_id},
-            headers=backend_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
 
 
 # ================================
@@ -250,57 +223,61 @@ async def fetch_live_conversation_messages(
 # ================================
 
 async def trigger_repost_ugc(business_account_id: str, permission_id: str) -> dict:
-    """Trigger UGC repost via backend after creator grants permission.
+    """Enqueue UGC repost job via outbound queue (queue-first pattern).
 
-    The backend verifies permission.status == 'granted', publishes to Instagram,
-    and updates ugc_permissions.status = 'reposted'.
+    The worker calls backend which verifies permission.status == 'granted',
+    publishes to Instagram, and updates ugc_permissions.status = 'reposted'.
 
     No cache — this is a one-time action.
 
-    Returns {"success": bool, "id": instagram_media_id, "original_author": str, "error": str|None}
+    Returns {"success": bool, "queued": bool, "job_id": str|None, "error": str|None}
     """
-    try:
-        result = await asyncio.to_thread(
-            _call_backend_repost_ugc, business_account_id, permission_id
-        )
-        return {
-            "success": True,
-            "id": result.get("id"),
-            "original_author": result.get("original_author"),
-        }
-    except httpx.HTTPStatusError as e:
-        logger.error(
-            f"repost-ugc HTTP {e.response.status_code} for permission {permission_id}: "
-            f"{e.response.text[:200]}"
-        )
-        return {"success": False, "error": f"http_{e.response.status_code}"}
-    except httpx.TimeoutException:
-        logger.error(f"repost-ugc timeout for permission {permission_id}")
-        return {"success": False, "error": "timeout"}
-    except Exception as e:
-        logger.error(f"trigger_repost_ugc failed for permission {permission_id}: {e}")
-        return {"success": False, "error": str(e)}
+    from services.outbound_queue import OutboundQueue
+
+    job = {
+        "job_id": str(_uuid.uuid4()),
+        "action_type": "repost_ugc",
+        "priority": "normal",
+        "endpoint": "/api/instagram/repost-ugc",
+        "payload": {
+            "business_account_id": business_account_id,
+            "permission_id": permission_id,
+        },
+        "business_account_id": business_account_id,
+        "idempotency_key": f"repost:{permission_id}",
+        "source": "ugc_discovery",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "retry_count": 0,
+        "max_retries": 5,
+    }
+    return OutboundQueue.enqueue(job)
 
 
 async def trigger_sync_ugc(business_account_id: str) -> dict:
-    """Trigger UGC sync at end of ugc_discovery run.
+    """Enqueue UGC sync job via outbound queue (queue-first pattern).
 
-    The backend fetches tagged posts from Graph API and upserts into ugc_discovered.
-    Called once per account per ugc_discovery cycle.
+    The worker calls backend which fetches tagged posts from Graph API
+    and upserts into ugc_discovered.
 
     No cache — end-of-run trigger.
 
-    Returns {"success": bool, "synced_count": int, "error": str|None}
+    Returns {"success": bool, "queued": bool, "job_id": str|None, "error": str|None}
     """
-    try:
-        result = await asyncio.to_thread(_call_backend_sync_ugc, business_account_id)
-        return {"success": True, "synced_count": result.get("synced_count", 0)}
-    except httpx.TimeoutException:
-        logger.error(f"sync-ugc timeout for {business_account_id}")
-        return {"success": False, "synced_count": 0, "error": "timeout"}
-    except httpx.HTTPStatusError as e:
-        logger.error(f"sync-ugc HTTP {e.response.status_code} for {business_account_id}")
-        return {"success": False, "synced_count": 0, "error": f"http_{e.response.status_code}"}
-    except Exception as e:
-        logger.error(f"trigger_sync_ugc failed for {business_account_id}: {e}")
-        return {"success": False, "synced_count": 0, "error": str(e)}
+    from services.outbound_queue import OutboundQueue
+
+    # Hourly bucket for idempotency (one sync per account per hour)
+    hour_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    job = {
+        "job_id": str(_uuid.uuid4()),
+        "action_type": "sync_ugc",
+        "priority": "normal",
+        "endpoint": "/api/instagram/sync-ugc",
+        "payload": {"business_account_id": business_account_id},
+        "business_account_id": business_account_id,
+        "idempotency_key": f"sync_ugc:{business_account_id}:{hour_bucket}",
+        "source": "ugc_discovery",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "retry_count": 0,
+        "max_retries": 5,
+    }
+    return OutboundQueue.enqueue(job)

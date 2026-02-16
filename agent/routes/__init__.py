@@ -10,3 +10,4 @@ from .attribution_routes import attribution_router
 from .ugc_collection_routes import ugc_collection_router
 from .analytics_routes import analytics_router
 from .oversight import oversight_router
+from .queue_routes import queue_router

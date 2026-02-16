@@ -31,9 +31,11 @@ Endpoints:
   POST /ugc-collection/resume        - Resume UGC collection
 """
 
+import asyncio
 import os
 import uuid as uuid_mod
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -41,7 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
-from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, limiter, CORS_ALLOW_ORIGINS
+from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, OUTBOUND_QUEUE_ENABLED, OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES, limiter, CORS_ALLOW_ORIGINS
 from middleware import api_key_middleware
 from services.prompt_service import PromptService
 from scheduler.scheduler_service import SchedulerService
@@ -60,7 +62,62 @@ from routes import (
     ugc_collection_router,
     analytics_router,
     oversight_router,
+    queue_router,
 )
+
+
+async def _recover_stuck_publishing_posts():
+    """Re-enqueue scheduled_posts stuck in 'publishing' on agent restart.
+
+    Targets rows older than OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES that were
+    left in 'publishing' state (e.g. agent crashed mid-publish).
+    """
+    try:
+        from services.supabase_service import SupabaseService, _execute_query, supabase
+        from services.outbound_queue import OutboundQueue
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES)
+        ).isoformat()
+
+        result = _execute_query(
+            supabase.table("scheduled_posts")
+            .select("id, business_account_id, generated_caption, asset_id")
+            .eq("status", "publishing")
+            .lt("updated_at", cutoff),
+            table="scheduled_posts",
+            operation="select",
+        )
+        rows = result.data or []
+        if not rows:
+            return
+
+        logger.warning(f"[startup_recovery] Found {len(rows)} stuck publishing posts — re-enqueueing")
+        for row in rows:
+            scheduled_post_id = str(row["id"])
+            job = {
+                "job_id": str(uuid_mod.uuid4()),
+                "action_type": "publish_post",
+                "priority": "normal",
+                "endpoint": "/api/instagram/publish-post",
+                "payload": {
+                    "business_account_id": str(row.get("business_account_id", "")),
+                    "scheduled_post_id": scheduled_post_id,
+                    "caption": row.get("generated_caption", ""),
+                    "image_url": "",   # Worker must resolve from asset_id if needed
+                    "media_type": "IMAGE",
+                },
+                "business_account_id": str(row.get("business_account_id", "")),
+                "idempotency_key": f"post:{scheduled_post_id}",
+                "source": "startup_recovery",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "retry_count": 0,
+                "max_retries": 5,
+            }
+            OutboundQueue.enqueue(job)
+            logger.info(f"[startup_recovery] Re-enqueued publish job for post {scheduled_post_id}")
+    except Exception as e:
+        logger.error(f"[startup_recovery] Failed to recover stuck publishing posts: {e}")
 
 
 @asynccontextmanager
@@ -80,6 +137,14 @@ async def lifespan(app: FastAPI):
     PromptService.load()
     # Start schedulers (engagement monitor + content scheduler)
     SchedulerService.init()
+    # Start outbound queue worker
+    from services.queue_worker import QueueWorker
+    worker = QueueWorker()
+    app.state.queue_worker = worker
+    if OUTBOUND_QUEUE_ENABLED:
+        worker.start()
+        asyncio.create_task(_recover_stuck_publishing_posts())
+    logger.info(f"  Outbound Queue Worker: {'enabled' if OUTBOUND_QUEUE_ENABLED else 'disabled'}")
     logger.info(f"  Engagement Monitor: {'enabled' if ENGAGEMENT_MONITOR_ENABLED else 'disabled'}")
     logger.info(f"  Content Scheduler: {'enabled' if CONTENT_SCHEDULER_ENABLED else 'disabled'}")
     logger.info(f"  Sales Attribution: {'enabled' if SALES_ATTRIBUTION_ENABLED else 'disabled'}")
@@ -90,6 +155,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Oversight Brain: /oversight/chat (auth+{OVERSIGHT_RATE_LIMIT}/user), /oversight/status (public), streaming={'enabled' if OVERSIGHT_STREAM_ENABLED else 'disabled'}")
     yield
     # Shutdown cleanup
+    if OUTBOUND_QUEUE_ENABLED:
+        await app.state.queue_worker.stop()
     SchedulerService.shutdown()
 
 
@@ -140,6 +207,7 @@ app.include_router(attribution_router)
 app.include_router(ugc_collection_router)
 app.include_router(analytics_router)
 app.include_router(oversight_router)
+app.include_router(queue_router)
 
 
 # ================================

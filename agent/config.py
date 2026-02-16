@@ -80,6 +80,7 @@ def validate_schema():
         "ugc_discovered": ["business_account_id", "instagram_media_id", "quality_score", "quality_tier"],
         "ugc_permissions": ["ugc_content_id", "business_account_id", "status"],
         "analytics_reports": ["business_account_id", "report_type", "report_date", "instagram_metrics", "insights"],
+        "outbound_queue_jobs": ["job_id", "action_type", "priority", "endpoint", "payload", "status", "retry_count"],
     }
     for table, columns in optional_tables.items():
         try:
@@ -296,3 +297,13 @@ BACKEND_CONVERSATIONS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/conversations
 BACKEND_CONVERSATION_MESSAGES_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/conversation-messages"
 BACKEND_REPOST_UGC_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/repost-ugc"
 BACKEND_SYNC_UGC_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/sync-ugc"
+
+# ================================
+# Outbound Job Queue
+# ================================
+OUTBOUND_QUEUE_ENABLED = os.getenv("OUTBOUND_QUEUE_ENABLED", "true").lower() == "true"
+OUTBOUND_QUEUE_POLL_INTERVAL = float(os.getenv("OUTBOUND_QUEUE_POLL_INTERVAL", "0.5"))
+OUTBOUND_QUEUE_RETRY_DELAYS = [60, 120, 240, 480, 960]  # seconds (1m→2m→4m→8m→16m)
+OUTBOUND_QUEUE_DLQ_TTL_DAYS = int(os.getenv("OUTBOUND_QUEUE_DLQ_TTL_DAYS", "30"))
+OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES = int(os.getenv("OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES", "30"))
+GRACEFUL_SHUTDOWN_TIMEOUT = int(os.getenv("OUTBOUND_QUEUE_GRACEFUL_SHUTDOWN_TIMEOUT", "15"))

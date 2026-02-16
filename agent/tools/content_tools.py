@@ -19,19 +19,15 @@ Functions:
 import random
 from datetime import datetime, timezone, timedelta
 
-import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+import uuid as _uuid
 
 from config import (
     logger,
     SUPABASE_URL,
-    BACKEND_PUBLISH_POST_ENDPOINT,
-    BACKEND_TIMEOUT_SECONDS,
     POST_APPROVAL_THRESHOLD,
     MAX_CAPTION_LENGTH,
     MAX_HASHTAG_COUNT,
     CONTENT_SCHEDULER_MAX_ASSETS_TO_SCORE,
-    backend_headers,
 )
 from services.supabase_service import SupabaseService
 
@@ -360,24 +356,8 @@ def build_full_caption(result: dict) -> str:
 
 
 # ================================
-# Publishing — Backend Proxy with Retry
+# Publishing — Queue-First
 # ================================
-@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
-def _call_backend_publish(payload: dict) -> dict:
-    """Backend publish call with retry logic.
-
-    Mirrors _call_backend_reply_comment from automation_tools.py.
-    """
-    with httpx.Client(timeout=BACKEND_TIMEOUT_SECONDS) as client:
-        response = client.post(
-            BACKEND_PUBLISH_POST_ENDPOINT,
-            json=payload,
-            headers=backend_headers(),
-        )
-        response.raise_for_status()
-        return response.json()
-
-
 async def publish_post(
     scheduled_post_id: str,
     business_account_id: str,
@@ -385,70 +365,55 @@ async def publish_post(
     caption: str,
     media_type: str = "IMAGE",
 ) -> dict:
-    """Publish post via backend proxy with state machine transitions.
-
-    Mirrors _reply_to_comment from automation_tools.py.
+    """Enqueue publish job via outbound queue (queue-first pattern).
 
     Flow:
       1. Set status → 'publishing' (prevents double-publish)
-      2. Call backend publish endpoint
-      3. On success → 'published', on failure → 'failed'
+      2. Enqueue job to Redis/Supabase outbound queue
+      3. Worker handles HTTP call + 'published'/'failed' transitions
 
     Returns:
-        {"success": bool, "instagram_media_id": str | None, "error": str | None}
+        {"success": bool, "queued": bool, "job_id": str | None, "error": str | None}
     """
-    # Transition: approved → publishing
+    from services.outbound_queue import OutboundQueue
+
+    # Transition: approved → publishing (prevents double-publish on re-enqueue)
     if not SupabaseService.update_scheduled_post_status(scheduled_post_id, "publishing"):
         logger.error(f"Failed to set 'publishing' status for post {scheduled_post_id}")
-        return {"success": False, "error": "status_update_failed"}
+        return {"success": False, "queued": False, "error": "status_update_failed"}
 
-    payload = {
+    job = {
+        "job_id": str(_uuid.uuid4()),
+        "action_type": "publish_post",
+        "priority": "normal",
+        "endpoint": "/api/instagram/publish-post",
+        "payload": {
+            "business_account_id": business_account_id,
+            "image_url": image_url,
+            "caption": caption,
+            "media_type": media_type,
+            "scheduled_post_id": scheduled_post_id,
+        },
         "business_account_id": business_account_id,
-        "image_url": image_url,
-        "caption": caption,
-        "media_type": media_type,
-        "scheduled_post_id": scheduled_post_id,
+        "idempotency_key": f"post:{scheduled_post_id}",
+        "source": "content_scheduler",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "retry_count": 0,
+        "max_retries": 5,
     }
 
-    try:
-        ig_response = _call_backend_publish(payload)
-
-        # Transition: publishing → published
-        SupabaseService.update_scheduled_post_status(
-            scheduled_post_id,
-            "published",
-            extra_fields={
-                "instagram_media_id": ig_response.get("id"),
-                "published_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-
-        return {
-            "success": True,
-            "instagram_media_id": ig_response.get("id"),
-            "error": None,
-        }
-
-    except httpx.TimeoutException:
-        logger.error(f"Backend timeout publishing post {scheduled_post_id}")
+    result = OutboundQueue.enqueue(job)
+    if not result.get("success"):
+        logger.error(f"Failed to enqueue publish job for post {scheduled_post_id}: {result.get('error')}")
         SupabaseService.update_scheduled_post_status(
             scheduled_post_id, "failed",
-            extra_fields={"publish_error": "Backend timed out"},
+            extra_fields={"publish_error": "queue_enqueue_failed"},
         )
-        return {"success": False, "instagram_media_id": None, "error": "timeout"}
+        return {"success": False, "queued": False, "error": "queue_enqueue_failed"}
 
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Backend error publishing post: {e.response.status_code}")
-        SupabaseService.update_scheduled_post_status(
-            scheduled_post_id, "failed",
-            extra_fields={"publish_error": f"HTTP {e.response.status_code}"},
-        )
-        return {"success": False, "instagram_media_id": None, "error": f"http_{e.response.status_code}"}
-
-    except Exception as e:
-        logger.error(f"Publish failed: {e}")
-        SupabaseService.update_scheduled_post_status(
-            scheduled_post_id, "failed",
-            extra_fields={"publish_error": str(e)},
-        )
-        return {"success": False, "instagram_media_id": None, "error": str(e)}
+    return {
+        "success": True,
+        "queued": True,
+        "job_id": result.get("job_id"),
+        "error": None,
+    }
