@@ -51,7 +51,10 @@ def validate_schema():
         "instagram_comments": ["text", "sentiment", "business_account_id", "created_at",
                                 "processed_by_automation", "automated_response_sent",
                                 "response_text", "media_id", "instagram_comment_id"],
-        "instagram_dm_conversations": ["customer_instagram_id", "business_account_id", "within_window"],
+        "instagram_dm_conversations": [
+            "customer_instagram_id", "business_account_id", "within_window",
+            "window_expires_at", "conversation_status", "instagram_thread_id",
+        ],
         "instagram_dm_messages": ["message_text", "conversation_id", "is_from_business", "sent_at"],
         "audit_log": ["event_type", "action", "details", "resource_type"],
     }
@@ -75,7 +78,7 @@ def validate_schema():
         "attribution_models": ["weights", "business_account_id"],
         "ugc_monitored_hashtags": ["business_account_id", "hashtag", "is_active"],
         "ugc_discovered": ["business_account_id", "instagram_media_id", "quality_score", "quality_tier"],
-        "ugc_permissions": ["ugc_discovered_id", "business_account_id", "status"],
+        "ugc_permissions": ["ugc_content_id", "business_account_id", "status"],
         "analytics_reports": ["business_account_id", "report_type", "report_date", "instagram_metrics", "insights"],
     }
     for table, columns in optional_tables.items():
@@ -187,7 +190,7 @@ limiter = Limiter(
     default_limits=["60/minute"],
 )
 
-MAX_DM_REPLY_LENGTH = 150
+MAX_DM_REPLY_LENGTH = 1000  # Backend allows 1000; Instagram actual DM limit
 MAX_COMMENT_REPLY_LENGTH = 2200   # Instagram's actual limit (matches backend validation)
 MAX_CAPTION_LENGTH = 2200
 MAX_HASHTAG_COUNT = 10

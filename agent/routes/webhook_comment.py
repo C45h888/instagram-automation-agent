@@ -50,13 +50,18 @@ def _parse_payload(raw: dict) -> CommentWebhookData:
     changes = entry.get("changes", [{}])[0]
     value = changes.get("value", {})
 
+    ig_page_id = entry.get("id", "")
     return CommentWebhookData(
         comment_id=value.get("id", ""),
         comment_text=value.get("text", ""),
         post_id=value.get("media", {}).get("id", ""),
         commenter_username=value.get("from", {}).get("username", "unknown"),
         commenter_id=value.get("from", {}).get("id", ""),
-        business_account_id=entry.get("id", ""),  # Page ID maps to business account
+        # Resolve IG numeric Page ID → Supabase UUID for backend proxy calls
+        business_account_id=(
+            SupabaseService.get_account_uuid_by_instagram_id(ig_page_id)
+            or ig_page_id  # fallback: pipeline logs the failure gracefully
+        ),
         timestamp=str(entry.get("time", "")),
     )
 

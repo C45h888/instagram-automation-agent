@@ -80,6 +80,17 @@ def _call_backend_media_insights(business_account_id: str, since: str, until: st
         return response.json()
 
 
+def _normalize_account_insights(metrics_list: list) -> dict:
+    """Map IG Graph API [{name, values:[{value}]}] → flat {metric: value} dict."""
+    result = {}
+    for metric in metrics_list:
+        name = metric.get("name", "")
+        values = metric.get("values", [])
+        if values:
+            result[name] = values[-1].get("value", 0)
+    return result
+
+
 async def fetch_account_insights(
     business_account_id: str,
     since: str,
@@ -87,14 +98,19 @@ async def fetch_account_insights(
 ) -> dict | None:
     """Fetch account-level IG metrics via backend proxy.
 
-    Returns data dict on success, None on failure (caller falls back to Supabase DB).
+    Returns flat {metric: value} dict on success, None on failure.
+    Handles both raw IG Graph API format [{name, values:[{value}]}]
+    and already-flat dict responses.
     """
     try:
         response = await asyncio.to_thread(
             _call_backend_account_insights, business_account_id, since, until
         )
         if response.get("success") and response.get("data"):
-            return response["data"]
+            data = response["data"]
+            if isinstance(data, list):
+                return _normalize_account_insights(data)
+            return data
         logger.warning(f"Backend proxy returned no data for account insights: {response}")
         return None
     except Exception as e:
@@ -110,13 +126,18 @@ async def fetch_media_insights(
     """Fetch post-level IG metrics via backend proxy.
 
     Returns list of media dicts on success, None on failure.
+    Backend returns {success: true, data: {media_insights: [...]}} — unwrap here.
     """
     try:
         response = await asyncio.to_thread(
             _call_backend_media_insights, business_account_id, since, until
         )
         if response.get("success") and response.get("data"):
-            return response["data"]
+            data = response["data"]
+            if isinstance(data, dict) and "media_insights" in data:
+                return data["media_insights"]   # unwrap backend wrapper
+            if isinstance(data, list):
+                return data
         logger.warning(f"Backend proxy returned no data for media insights: {response}")
         return None
     except Exception as e:

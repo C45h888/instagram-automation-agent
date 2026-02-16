@@ -52,12 +52,17 @@ def _parse_payload(raw: dict) -> DMWebhookData:
     messaging = entry.get("messaging", [{}])[0]
     message = messaging.get("message", {})
 
+    ig_page_id = entry.get("id", "")
     return DMWebhookData(
         message_id=message.get("mid", ""),
         message_text=message.get("text", ""),
         sender_username="",  # Not provided in webhook, could fetch separately
         sender_id=messaging.get("sender", {}).get("id", ""),
-        business_account_id=entry.get("id", ""),
+        # Resolve IG numeric Page ID → Supabase UUID for backend proxy calls
+        business_account_id=(
+            SupabaseService.get_account_uuid_by_instagram_id(ig_page_id)
+            or ig_page_id  # fallback: pipeline logs the failure gracefully
+        ),
         conversation_id=messaging.get("sender", {}).get("id", ""),  # Conversation ID = sender ID
         timestamp=str(messaging.get("timestamp", "")),
         has_attachments=bool(message.get("attachments")),

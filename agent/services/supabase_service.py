@@ -263,6 +263,35 @@ class SupabaseService:
             return {}
 
     # --------------------------------------------------
+    # READ: Resolve IG Business ID → Supabase UUID
+    # --------------------------------------------------
+    @staticmethod
+    def get_account_uuid_by_instagram_id(instagram_business_id: str) -> str | None:
+        """Resolve Instagram Business ID (numeric string) → Supabase UUID.
+
+        Queries instagram_business_accounts.instagram_business_id (unique varchar).
+        Used by webhook handlers: Meta sends entry.id as the IG numeric ID but all
+        backend proxy calls require the Supabase UUID (instagram_business_accounts.id).
+        Returns None if not found.
+        """
+        if not supabase or not instagram_business_id:
+            return None
+        try:
+            result = _execute_query(
+                supabase.table("instagram_business_accounts")
+                .select("id")
+                .eq("instagram_business_id", instagram_business_id)
+                .limit(1),
+                table="instagram_business_accounts",
+                operation="select",
+            )
+            data = result.data
+            return data[0]["id"] if data else None
+        except Exception as e:
+            logger.warning(f"Failed to resolve IG ID {instagram_business_id} → UUID: {e}")
+            return None
+
+    # --------------------------------------------------
     # READ: Recent Comments
     # --------------------------------------------------
     @staticmethod
@@ -736,19 +765,19 @@ class SupabaseService:
             records.append({
                 "customer_instagram_id": customer_id,
                 "business_account_id": business_account_id,
-                "conversation_id": conv["id"],
+                "instagram_thread_id": conv["id"],   # DB column, not conversation_id
                 "within_window": is_open,
                 "window_expires_at": window_expires_at,
                 "last_message_at": conv.get("last_message_at"),
                 "message_count": conv.get("message_count", 0) or 0,
-                "conversation_status": "open",
+                "conversation_status": "active",     # DB check: active/archived/muted/blocked/pending
             })
         if not records:
             return 0
         try:
             result = _execute_query(
                 supabase.table("instagram_dm_conversations")
-                .upsert(records, on_conflict="customer_instagram_id,business_account_id"),
+                .upsert(records, on_conflict="instagram_thread_id"),
                 table="instagram_dm_conversations",
                 operation="upsert"
             )
@@ -782,13 +811,14 @@ class SupabaseService:
             return 0
         records = [
             {
-                "message_id": m["id"],
+                "instagram_message_id": m["id"],        # DB unique column (not message_id)
                 "message_text": m.get("message", ""),
-                "conversation_id": conversation_id,
+                "conversation_id": conversation_id,     # UUID FK (nullable) — passed by caller
                 "business_account_id": business_account_id,
                 "is_from_business": m.get("from", {}).get("id") == business_ig_user_id,
+                "recipient_instagram_id": m.get("from", {}).get("id") or "",  # NOT NULL in DB
                 "sent_at": m.get("created_time"),
-                "send_status": "received",
+                "send_status": "delivered",             # DB check: pending/sent/delivered/failed/rejected
             }
             for m in messages if m.get("id")
         ]
@@ -797,7 +827,7 @@ class SupabaseService:
         try:
             result = _execute_query(
                 supabase.table("instagram_dm_messages")
-                .upsert(records, on_conflict="message_id"),
+                .upsert(records, on_conflict="instagram_message_id"),
                 table="instagram_dm_messages",
                 operation="upsert"
             )
@@ -824,7 +854,7 @@ class SupabaseService:
         try:
             result = _execute_query(
                 supabase.table("ugc_permissions")
-                .select("id, ugc_discovered_id, username")
+                .select("id, ugc_content_id")        # DB FK is ugc_content_id, no username column
                 .eq("business_account_id", business_account_id)
                 .eq("status", "granted"),
                 table="ugc_permissions",
@@ -1169,7 +1199,10 @@ class SupabaseService:
     # --------------------------------------------------
     @staticmethod
     def create_ugc_discovered(data: dict) -> dict:
-        """Insert a discovered UGC post into ugc_discovered.
+        """Upsert a discovered UGC post into ugc_discovered.
+
+        Uses upsert on instagram_media_id to safely overwrite unscored rows
+        pre-populated by the backend's /sync-ugc endpoint.
 
         Expected data keys:
           business_account_id, instagram_media_id, source, source_hashtag,
@@ -1182,9 +1215,9 @@ class SupabaseService:
 
         try:
             result = _execute_query(
-                supabase.table("ugc_discovered").insert(data),
+                supabase.table("ugc_discovered").upsert(data, on_conflict="instagram_media_id"),
                 table="ugc_discovered",
-                operation="insert"
+                operation="upsert"
             )
             return result.data[0] if result.data else {}
 
@@ -1199,12 +1232,60 @@ class SupabaseService:
     # WRITE: Create UGC Permission (UGC Collection)
     # --------------------------------------------------
     @staticmethod
+    def create_or_get_ugc_content(
+        business_account_id: str,
+        instagram_media_id: str,
+        author_id: str,
+        author_username: str,
+        media_url: str,
+        media_type: str,
+        caption: str,
+        permalink: str,
+        like_count: int,
+        comment_count: int,
+        post_timestamp: str,
+    ) -> str | None:
+        """Upsert a ugc_content record (DB source of truth for permissions FK).
+
+        The ugc_permissions table requires a ugc_content_id FK to ugc_content.
+        This method upserts a minimal ugc_content row and returns the UUID.
+        Returns the ugc_content.id UUID, or None on failure.
+        """
+        if not supabase or not instagram_media_id:
+            return None
+        try:
+            result = _execute_query(
+                supabase.table("ugc_content")
+                .upsert({
+                    "business_account_id": business_account_id,
+                    "visitor_post_id": instagram_media_id,
+                    "author_id": author_id or "",
+                    "author_username": author_username,
+                    "message": caption[:2000] if caption else None,
+                    "permalink_url": permalink or "",
+                    "media_type": media_type or "IMAGE",
+                    "media_url": media_url,
+                    "like_count": like_count or 0,
+                    "comment_count": comment_count or 0,
+                    "created_time": post_timestamp or datetime.now(timezone.utc).isoformat(),
+                }, on_conflict="visitor_post_id")
+                .select("id")
+                .single(),
+                table="ugc_content",
+                operation="upsert",
+            )
+            return result.data["id"] if result.data else None
+        except Exception as e:
+            logger.error(f"Failed to create ugc_content for {instagram_media_id}: {e}")
+            return None
+
+    @staticmethod
     def create_ugc_permission(data: dict) -> dict:
         """Insert a UGC permission request into ugc_permissions.
 
         Expected data keys:
-          ugc_discovered_id, business_account_id, username,
-          dm_message_text, status, run_id
+          ugc_content_id (FK to ugc_content.id), business_account_id,
+          dm_message_text, status (pending/granted/denied/expired), run_id
         """
         if not supabase:
             return {}
@@ -1233,7 +1314,7 @@ class SupabaseService:
         status: str,
         extra_fields: dict = None,
     ) -> bool:
-        """Update UGC permission status (pending_send -> sent -> granted/denied)."""
+        """Update UGC permission status. Valid values: pending/granted/denied/expired."""
         if not supabase or not permission_id:
             return False
 

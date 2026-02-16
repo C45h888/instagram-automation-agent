@@ -367,45 +367,63 @@ def _process_post(run_id: str, post: dict, account: dict) -> dict:
             post_permalink=post.get("permalink", ""),
         )
 
-        permission_row = {
-            "ugc_discovered_id": ugc_discovered_id,
-            "business_account_id": account_id,
-            "username": post.get("username", ""),
-            "dm_message_text": dm_text,
-            "status": "pending_send",
-            "run_id": run_id,
-        }
+        # ugc_permissions requires ugc_content_id FK to ugc_content.
+        # Upsert a ugc_content record first, then use its UUID.
+        ugc_content_id = SupabaseService.create_or_get_ugc_content(
+            business_account_id=account_id,
+            instagram_media_id=media_id,
+            author_id=post.get("owner_id", "") or "",
+            author_username=post.get("username", ""),
+            media_url=post.get("media_url", ""),
+            media_type=post.get("media_type", "IMAGE"),
+            caption=(post.get("caption") or "")[:2000],
+            permalink=post.get("permalink", ""),
+            like_count=post.get("like_count", 0) or 0,
+            comment_count=post.get("comments_count", 0) or 0,
+            post_timestamp=post.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+        )
 
-        if UGC_COLLECTION_AUTO_SEND_DM:
-            recipient_id = post.get("owner_id", "") or ""
-            if not recipient_id:
-                logger.info(
-                    f"DM skipped for @{post.get('username')} — "
-                    "no numeric owner_id in post data (backend search-hashtag must include owner{id})"
-                )
-                permission_row["status"] = "send_failed"
-                permission_row["send_error"] = "missing_owner_id"
-                result["dm_sent"] = False
-                SupabaseService.create_ugc_permission(permission_row)
-                continue
-            dm_result = send_permission_dm(
-                business_account_id=account_id,
-                recipient_id=recipient_id,
-                recipient_username=post.get("username", ""),
-                message_text=dm_text,
+        if not ugc_content_id:
+            logger.warning(
+                f"[{run_id}] Skipping permission creation for @{post.get('username')} — "
+                f"failed to create ugc_content record for media {media_id}"
             )
-            if dm_result.get("success"):
-                permission_row["status"] = "sent"
-                permission_row["sent_at"] = datetime.now(timezone.utc).isoformat()
-                result["dm_sent"] = True
-            else:
-                permission_row["status"] = "send_failed"
-                permission_row["send_error"] = dm_result.get("error")
-                result["dm_sent"] = False
         else:
-            result["dm_queued"] = True
+            permission_row = {
+                "ugc_content_id": ugc_content_id,  # FK to ugc_content (not ugc_discovered)
+                "business_account_id": account_id,
+                "dm_message_text": dm_text,
+                "status": "pending",    # DB check: pending/granted/denied/expired only
+                "run_id": run_id,
+            }
 
-        SupabaseService.create_ugc_permission(permission_row)
+            if UGC_COLLECTION_AUTO_SEND_DM:
+                recipient_id = post.get("owner_id", "") or ""
+                if not recipient_id:
+                    logger.info(
+                        f"DM skipped for @{post.get('username')} — "
+                        "no numeric owner_id in post data (backend search-hashtag must include owner{id})"
+                    )
+                    permission_row["status"] = "expired"   # send impossible — closest valid status
+                    result["dm_sent"] = False
+                    SupabaseService.create_ugc_permission(permission_row)
+                else:
+                    dm_result = send_permission_dm(
+                        business_account_id=account_id,
+                        recipient_id=recipient_id,
+                        recipient_username=post.get("username", ""),
+                        message_text=dm_text,
+                    )
+                    if dm_result.get("success"):
+                        permission_row["status"] = "pending"  # DM sent, awaiting reply
+                        result["dm_sent"] = True
+                    else:
+                        permission_row["status"] = "expired"  # send failed — no pending action
+                        result["dm_sent"] = False
+                    SupabaseService.create_ugc_permission(permission_row)
+            else:
+                result["dm_queued"] = True
+                SupabaseService.create_ugc_permission(permission_row)
 
     # Audit log
     SupabaseService.log_decision(
