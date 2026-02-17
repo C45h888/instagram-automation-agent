@@ -163,20 +163,48 @@ class QueueWorker:
             await self._on_success(job, response, time.monotonic() - start_time)
 
         except httpx.HTTPStatusError as e:
-            is_rate_limit = e.response.status_code == 429
-            error = f"http_{e.response.status_code}: {e.response.text[:200]}"
-            logger.warning(f"Job {job_id} backend HTTP error: {error} rate_limit={is_rate_limit}")
-            await self._on_failure(job, error, is_rate_limit=is_rate_limit)
+            # Parse structured error metadata from backend response body
+            try:
+                body = e.response.json()
+            except Exception:
+                body = {}
+
+            retryable = body.get("retryable", True)   # Default safe: retry if backend doesn't say
+            error_category = body.get("error_category", "unknown")
+            retry_after_seconds = body.get("retry_after_seconds", None)
+            error_msg = body.get("error") or f"http_{e.response.status_code}: {e.response.text[:200]}"
+
+            logger.warning(
+                f"Job {job_id} backend HTTP error: {error_msg} "
+                f"category={error_category} retryable={retryable}"
+            )
+            await self._on_failure(
+                job,
+                error_msg,
+                retryable=retryable,
+                error_category=error_category,
+                retry_after_seconds=retry_after_seconds,
+            )
 
         except httpx.TimeoutException:
-            error = "backend_timeout"
             logger.warning(f"Job {job_id} backend timeout")
-            await self._on_failure(job, error)
+            await self._on_failure(
+                job,
+                "backend_timeout",
+                retryable=True,
+                error_category="transient",
+                retry_after_seconds=30,
+            )
 
         except Exception as e:
             error = f"{type(e).__name__}: {e}"
             logger.error(f"Job {job_id} unexpected execution error: {error}")
-            await self._on_failure(job, error)
+            await self._on_failure(
+                job,
+                error,
+                retryable=True,
+                error_category="unknown",
+            )
 
         finally:
             self._in_flight.discard(job_id)
@@ -287,52 +315,50 @@ class QueueWorker:
         )
         logger.info(f"publish_post settled: post={scheduled_post_id} media_id={instagram_media_id}")
 
-    async def _on_failure(self, job: dict, error: str, is_rate_limit: bool = False) -> None:
-        """Handle failed job execution: retry or DLQ."""
+    async def _on_failure(
+        self,
+        job: dict,
+        error: str,
+        retryable: bool = True,
+        error_category: str = "unknown",
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        """Handle failed job execution: retry or DLQ.
+
+        retryable=False  → immediate DLQ, no retry budget consumed
+        error_category   → 'rate_limit', 'transient', 'auth_failure', 'permanent', 'unknown'
+        retry_after_seconds → explicit delay from backend (overrides RETRY_DELAYS when set)
+        """
         from services.supabase_service import SupabaseService
         from routes.metrics import OUTBOUND_QUEUE_EXECUTE, OUTBOUND_QUEUE_RETRIES, OUTBOUND_QUEUE_DLQ
 
         job_id = job.get("job_id", "unknown")
         action_type = job.get("action_type", "unknown")
 
-        # Copy job and increment retry count
+        # Copy job and update error state
         job = dict(job)
-        retry_count = job.get("retry_count", 0) + 1
-        job["retry_count"] = retry_count
+        job["retry_count"] = job.get("retry_count", 0) + 1
         job["last_error"] = error
 
+        retry_count = job["retry_count"]
         max_retries = job.get("max_retries", 5)
 
-        if retry_count <= max_retries:
-            # Schedule retry with exponential backoff
-            delay = RETRY_DELAYS[min(retry_count - 1, len(RETRY_DELAYS) - 1)]
-            if is_rate_limit:
-                delay = max(delay, RATE_LIMIT_DELAY_FLOOR)
-
-            await asyncio.to_thread(OutboundQueue.schedule_retry, job, delay)
-            await asyncio.to_thread(OutboundQueue.release_execution_lock, job_id)
-
-            OUTBOUND_QUEUE_EXECUTE.labels(action_type=action_type, status="error").inc()
-            OUTBOUND_QUEUE_RETRIES.labels(action_type=action_type).inc()
-
+        # Non-retryable: auth failure, permanent bad params, policy block, etc.
+        # Go straight to DLQ — retrying wastes budget and won't fix the root cause.
+        if not retryable:
             logger.warning(
-                f"Job retry scheduled: job={job_id} action={action_type} "
-                f"attempt={retry_count}/{max_retries} delay={delay}s error={error}"
+                f"[Worker] Job {job_id} non-retryable "
+                f"({error_category}): {error}"
             )
-
-        else:
-            # Max retries exhausted — move to DLQ
-            await asyncio.to_thread(OutboundQueue.move_to_dlq, job, error)
+            await asyncio.to_thread(OutboundQueue.move_to_dlq, job, reason=f"non_retryable:{error_category}:{error}")
             await asyncio.to_thread(OutboundQueue.release_execution_lock, job_id)
 
-            # Action-specific DLQ settlement
             if action_type == "publish_post":
                 await self._settle_publish_post_failure(job, error)
 
             OUTBOUND_QUEUE_EXECUTE.labels(action_type=action_type, status="error").inc()
             OUTBOUND_QUEUE_DLQ.labels(action_type=action_type).inc()
 
-            # Audit log the DLQ event
             await asyncio.to_thread(
                 SupabaseService.log_decision,
                 event_type="outbound_job_dlq",
@@ -345,8 +371,66 @@ class QueueWorker:
                     "source": job.get("source", ""),
                     "total_retries": retry_count,
                     "final_error": error,
+                    "error_category": error_category,
+                    "non_retryable": True,
                 },
             )
+            self._in_flight.discard(job_id)
+            return
+
+        if retry_count <= max_retries:
+            # Determine retry delay:
+            # 1. Use explicit backend hint if provided
+            # 2. For rate_limit without hint: max(backoff_table, RATE_LIMIT_DELAY_FLOOR)
+            # 3. For everything else: standard backoff table
+            if retry_after_seconds is not None:
+                delay = retry_after_seconds
+            elif error_category == "rate_limit":
+                backoff = RETRY_DELAYS[min(retry_count - 1, len(RETRY_DELAYS) - 1)]
+                delay = max(backoff, RATE_LIMIT_DELAY_FLOOR)
+            else:
+                delay = RETRY_DELAYS[min(retry_count - 1, len(RETRY_DELAYS) - 1)]
+
+            await asyncio.to_thread(OutboundQueue.schedule_retry, job, delay)
+            await asyncio.to_thread(OutboundQueue.release_execution_lock, job_id)
+
+            OUTBOUND_QUEUE_EXECUTE.labels(action_type=action_type, status="error").inc()
+            OUTBOUND_QUEUE_RETRIES.labels(action_type=action_type).inc()
+
+            logger.warning(
+                f"[Worker] Retry {retry_count}/{max_retries} for job {job_id} "
+                f"in {delay}s (category={error_category})"
+            )
+
+        else:
+            # Max retries exhausted — move to DLQ
+            reason = f"max_retries_exceeded:{error_category}:{error}"
+            await asyncio.to_thread(OutboundQueue.move_to_dlq, job, reason)
+            await asyncio.to_thread(OutboundQueue.release_execution_lock, job_id)
+
+            if action_type == "publish_post":
+                await self._settle_publish_post_failure(job, error)
+
+            OUTBOUND_QUEUE_EXECUTE.labels(action_type=action_type, status="error").inc()
+            OUTBOUND_QUEUE_DLQ.labels(action_type=action_type).inc()
+
+            await asyncio.to_thread(
+                SupabaseService.log_decision,
+                event_type="outbound_job_dlq",
+                action="dlq",
+                resource_type="outbound_queue_job",
+                resource_id=job_id,
+                user_id=job.get("business_account_id", ""),
+                details={
+                    "action_type": action_type,
+                    "source": job.get("source", ""),
+                    "total_retries": retry_count,
+                    "final_error": error,
+                    "error_category": error_category,
+                },
+            )
+
+        self._in_flight.discard(job_id)
 
     async def _settle_publish_post_failure(self, job: dict, error: str) -> None:
         """Update scheduled_posts → 'failed' when publish_post exhausts retries."""
