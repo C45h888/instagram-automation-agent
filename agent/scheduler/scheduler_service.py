@@ -34,12 +34,15 @@ from config import (
     ANALYTICS_DAILY_MINUTE,
     ANALYTICS_WEEKLY_DAY,
     ANALYTICS_WEEKLY_HOUR,
+    HEARTBEAT_ENABLED,
+    HEARTBEAT_INTERVAL_MINUTES,
 )
 from scheduler.engagement_monitor import engagement_monitor_run
 from scheduler.content_scheduler import content_scheduler_run
 from scheduler.weekly_attribution_learning import weekly_attribution_learning_run
 from scheduler.ugc_discovery import ugc_discovery_run
 from scheduler.analytics_reports import analytics_reports_run
+from scheduler.heartbeat_sender import heartbeat_sender_run
 
 
 class SchedulerService:
@@ -174,6 +177,20 @@ class SchedulerService:
         else:
             logger.info("Analytics Reports disabled (ANALYTICS_REPORTS_ENABLED=false)")
 
+        # --- Heartbeat Sender (interval-based) ---
+        if HEARTBEAT_ENABLED:
+            cls._scheduler.add_job(
+                cls._make_tracked_runner("heartbeat", heartbeat_sender_run),
+                "interval",
+                minutes=HEARTBEAT_INTERVAL_MINUTES,
+                id="heartbeat",
+                name="Heartbeat Sender",
+            )
+            cls._job_stats["heartbeat"] = {"last_run_time": None, "total_runs": 0}
+            logger.info(f"Heartbeat Sender scheduled (every {HEARTBEAT_INTERVAL_MINUTES} min)")
+        else:
+            logger.info("Heartbeat Sender disabled (HEARTBEAT_ENABLED=false)")
+
         cls._scheduler.start()
         logger.info("Scheduler started")
 
@@ -264,6 +281,13 @@ class SchedulerService:
             {"day_of_week": ANALYTICS_WEEKLY_DAY, "hour": ANALYTICS_WEEKLY_HOUR},
         )
 
+        # Heartbeat sender (interval-based)
+        result["heartbeat"] = cls._get_job_status(
+            "heartbeat",
+            HEARTBEAT_ENABLED,
+            {"interval_minutes": HEARTBEAT_INTERVAL_MINUTES},
+        )
+
         return result
 
     @classmethod
@@ -332,6 +356,7 @@ class SchedulerService:
             "ugc_collection": ugc_discovery_run,
             "analytics_daily": lambda: analytics_reports_run("daily"),
             "analytics_weekly": lambda: analytics_reports_run("weekly"),
+            "heartbeat": heartbeat_sender_run,
         }
         func = runners.get(job_prefix)
         if not func:

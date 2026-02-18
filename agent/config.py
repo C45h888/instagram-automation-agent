@@ -81,6 +81,7 @@ def validate_schema():
         "ugc_permissions": ["ugc_content_id", "business_account_id", "status"],
         "analytics_reports": ["business_account_id", "report_type", "report_date", "instagram_metrics", "insights"],
         "outbound_queue_jobs": ["job_id", "action_type", "priority", "endpoint", "payload", "status", "retry_count"],
+        "system_alerts": ["business_account_id", "alert_type", "message", "details", "resolved"],
     }
     for table, columns in optional_tables.items():
         try:
@@ -297,6 +298,13 @@ BACKEND_CONVERSATIONS_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/conversations
 BACKEND_CONVERSATION_MESSAGES_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/conversation-messages"
 BACKEND_REPOST_UGC_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/repost-ugc"
 BACKEND_SYNC_UGC_ENDPOINT = f"{BACKEND_API_URL}/api/instagram/sync-ugc"
+
+# ================================
+# Heartbeat Sender
+# ================================
+HEARTBEAT_ENABLED = os.getenv("HEARTBEAT_ENABLED", "true").lower() == "true"
+HEARTBEAT_INTERVAL_MINUTES = int(os.getenv("HEARTBEAT_INTERVAL_MINUTES", "20"))
+HEARTBEAT_AGENT_ID = os.getenv("HEARTBEAT_AGENT_ID", "00000000-0000-0000-0000-000000000000")
 
 # ================================
 # Outbound Job Queue

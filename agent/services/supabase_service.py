@@ -2029,21 +2029,34 @@ class SupabaseService:
             return False
 
     @staticmethod
-    def get_outbound_dlq(limit: int = 50) -> list:
-        """Fetch DLQ jobs from outbound_queue_jobs for the /queue/dlq endpoint."""
+    def get_outbound_dlq(
+        limit: int = 50,
+        error_category: str = None,
+        business_account_id: str = None,
+    ) -> list:
+        """Fetch DLQ jobs from outbound_queue_jobs for the /queue/dlq endpoint.
+
+        Optional filters:
+          error_category       — e.g. 'auth_failure', 'permanent'
+          business_account_id  — filter to a single account's jobs
+        """
         if not supabase:
             return []
 
         try:
-            result = _execute_query(
+            query = (
                 supabase.table("outbound_queue_jobs")
                 .select("*")
                 .eq("status", "dlq")
                 .order("created_at", desc=True)
-                .limit(limit),
-                table="outbound_queue_jobs",
-                operation="select",
+                .limit(limit)
             )
+            if error_category:
+                query = query.eq("error_category", error_category)
+            if business_account_id:
+                query = query.eq("business_account_id", business_account_id)
+
+            result = _execute_query(query, table="outbound_queue_jobs", operation="select")
             return result.data or []
         except CircuitBreakerError:
             logger.error("Circuit breaker OPEN — skipping DLQ fetch")
@@ -2051,6 +2064,112 @@ class SupabaseService:
         except Exception as e:
             logger.warning(f"Failed to fetch DLQ jobs: {e}")
             return []
+
+    @staticmethod
+    def get_business_account(business_account_id: str) -> dict:
+        """Fetch a single business account by UUID.
+
+        Returns dict with id, username, is_connected, connection_status.
+        Returns {} if not found or on error.
+        Used by retry_dlq to check account connectivity before re-enqueuing.
+        """
+        if not supabase or not _is_valid_uuid(business_account_id):
+            return {}
+
+        try:
+            result = _execute_query(
+                supabase.table("instagram_business_accounts")
+                .select("id, username, is_connected, connection_status")
+                .eq("id", business_account_id)
+                .limit(1),
+                table="instagram_business_accounts",
+                operation="select",
+            )
+            return result.data[0] if result.data else {}
+        except CircuitBreakerError:
+            logger.error(
+                f"Circuit breaker OPEN — failed to fetch account {business_account_id}"
+            )
+            return {}
+        except Exception as e:
+            logger.warning(f"Failed to fetch business account {business_account_id}: {e}")
+            return {}
+
+    @staticmethod
+    def mark_account_disconnected(business_account_id: str) -> bool:
+        """Mark a business account as disconnected after an auth_failure.
+
+        Sets is_connected=False and connection_status='disconnected'.
+        Idempotent — safe to call even if already disconnected.
+        get_active_business_accounts() filters these out, so all schedulers
+        will automatically skip this account on their next cycle.
+        """
+        if not supabase or not business_account_id:
+            return False
+
+        update_data = {
+            "is_connected": False,
+            "connection_status": "disconnected",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        try:
+            _execute_query(
+                supabase.table("instagram_business_accounts")
+                .update(update_data)
+                .eq("id", business_account_id),
+                table="instagram_business_accounts",
+                operation="update",
+            )
+            return True
+        except CircuitBreakerError:
+            logger.error(
+                f"Circuit breaker OPEN — failed to mark account {business_account_id} disconnected"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to mark account {business_account_id} disconnected: {e}")
+            return False
+
+    @staticmethod
+    def create_system_alert(
+        alert_type: str,
+        business_account_id: str,
+        message: str,
+        details: dict = None,
+    ) -> dict:
+        """Insert a system alert row into system_alerts.
+
+        Used for operational alerts that should surface in the dashboard.
+        Returns the inserted row dict, or {} on failure.
+        """
+        if not supabase:
+            return {}
+
+        row = {
+            "alert_type": alert_type,
+            "business_account_id": business_account_id if _is_valid_uuid(business_account_id) else None,
+            "message": message,
+            "details": details or {},
+            "resolved": False,
+        }
+
+        try:
+            result = _execute_query(
+                supabase.table("system_alerts").insert(row),
+                table="system_alerts",
+                operation="insert",
+            )
+            return result.data[0] if result.data else {}
+        except CircuitBreakerError:
+            logger.error(
+                f"Circuit breaker OPEN — failed to create system_alert "
+                f"(type={alert_type} account={business_account_id})"
+            )
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to create system_alert: {e}")
+            return {}
 
     @staticmethod
     def get_outbound_job_by_idempotency_key(idempotency_key: str) -> dict:

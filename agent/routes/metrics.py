@@ -226,6 +226,12 @@ OUTBOUND_QUEUE_DLQ = Counter(
     ["action_type"],
 )
 
+AUTH_FAILURE_DISCONNECTS = Counter(
+    "agent_auth_failure_disconnects_total",
+    "Business accounts disconnected due to auth_failure",
+    ["action_type"],
+)
+
 OUTBOUND_QUEUE_DEPTH = Gauge(
     "agent_outbound_queue_depth",
     "Current queue depth",
@@ -237,6 +243,15 @@ OUTBOUND_QUEUE_LATENCY = Histogram(
     "End-to-end job execution latency from enqueue to success",
     ["action_type"],
     buckets=[0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0],
+)
+
+# ================================
+# Heartbeat Metrics
+# ================================
+HEARTBEAT_SENDS = Counter(
+    "agent_heartbeat_sends_total",
+    "Heartbeat pings sent to backend",
+    ["status"],  # success | error
 )
 
 

@@ -43,7 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
-from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, OUTBOUND_QUEUE_ENABLED, OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES, limiter, CORS_ALLOW_ORIGINS
+from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, OUTBOUND_QUEUE_ENABLED, OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES, HEARTBEAT_ENABLED, HEARTBEAT_INTERVAL_MINUTES, HEARTBEAT_AGENT_ID, limiter, CORS_ALLOW_ORIGINS
 from middleware import api_key_middleware
 from services.prompt_service import PromptService
 from scheduler.scheduler_service import SchedulerService
@@ -151,6 +151,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Weekly Learning: {'enabled' if WEEKLY_LEARNING_ENABLED else 'disabled'}")
     logger.info(f"  UGC Collection: {'enabled' if UGC_COLLECTION_ENABLED else 'disabled'}")
     logger.info(f"  Analytics Reports: {'enabled' if ANALYTICS_REPORTS_ENABLED else 'disabled'}")
+    logger.info(f"  Heartbeat Sender: {'enabled' if HEARTBEAT_ENABLED else 'disabled'} "
+                f"(interval: {HEARTBEAT_INTERVAL_MINUTES}min, agent_id: {HEARTBEAT_AGENT_ID})")
     from config import OVERSIGHT_STREAM_ENABLED, OVERSIGHT_RATE_LIMIT
     logger.info(f"  Oversight Brain: /oversight/chat (auth+{OVERSIGHT_RATE_LIMIT}/user), /oversight/status (public), streaming={'enabled' if OVERSIGHT_STREAM_ENABLED else 'disabled'}")
     yield

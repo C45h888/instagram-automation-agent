@@ -300,10 +300,11 @@ class OutboundQueue:
         return drained
 
     @staticmethod
-    def move_to_dlq(job: dict, reason: str) -> bool:
+    def move_to_dlq(job: dict, reason: str, error_category: str = None) -> bool:
         """Push exhausted job to DLQ (Redis sorted set + Supabase permanent record).
 
         Returns True on success.
+        error_category is persisted to the DB for clean DLQ filtering.
         """
         from services.supabase_service import SupabaseService
 
@@ -316,19 +317,24 @@ class OutboundQueue:
                 dlq_entry = dict(job)
                 dlq_entry["dlq_reason"] = reason
                 dlq_entry["dlq_at"] = datetime.fromtimestamp(failed_at, tz=timezone.utc).isoformat()
+                if error_category:
+                    dlq_entry["error_category"] = error_category
                 r.zadd(QUEUE_DLQ, {json.dumps(dlq_entry, default=str): failed_at})
             except Exception as e:
                 logger.warning(f"Redis DLQ write failed for {job_id}: {e}")
 
         # Always write to Supabase for permanence
         try:
+            extra = {
+                "last_error": reason,
+                "retry_count": job.get("retry_count", 0),
+            }
+            if error_category:
+                extra["error_category"] = error_category
             SupabaseService.update_outbound_job_status(
                 job_id,
                 "dlq",
-                extra_fields={
-                    "last_error": reason,
-                    "retry_count": job.get("retry_count", 0),
-                },
+                extra_fields=extra,
             )
         except Exception as e:
             logger.error(f"Supabase DLQ write failed for {job_id}: {e}")

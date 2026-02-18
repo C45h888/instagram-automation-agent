@@ -33,11 +33,24 @@ async def queue_status():
 
 
 @queue_router.get("/dlq")
-async def get_dlq(limit: int = Query(default=50, ge=1, le=200)):
-    """Auth required — list dead-letter jobs (up to `limit`)."""
+async def get_dlq(
+    limit: int = Query(default=50, ge=1, le=200),
+    error_category: str = Query(default=None, description="Filter by error category, e.g. 'auth_failure'"),
+    business_account_id: str = Query(default=None, description="Filter to a single business account UUID"),
+):
+    """Auth required — list dead-letter jobs (up to `limit`).
+
+    Optional filters:
+      ?error_category=auth_failure
+      ?business_account_id=<uuid>
+    """
     try:
         from services.supabase_service import SupabaseService
-        jobs = SupabaseService.get_outbound_dlq(limit=limit)
+        jobs = SupabaseService.get_outbound_dlq(
+            limit=limit,
+            error_category=error_category,
+            business_account_id=business_account_id,
+        )
         return {"status": "ok", "count": len(jobs), "jobs": jobs}
     except Exception as e:
         logger.error(f"get_dlq error: {e}")
@@ -58,9 +71,24 @@ async def retry_dlq(limit: int = Query(default=50, ge=1, le=200)):
         jobs = SupabaseService.get_outbound_dlq(limit=limit)
         re_enqueued = 0
         failed = 0
+        skipped_disconnected = 0
 
         for job in jobs:
             job_id = str(job.get("job_id", ""))
+
+            # Block retry of auth_failure jobs when the account is still disconnected.
+            # Fail-open: if account fetch fails (DB down), allow retry rather than silently blocking.
+            if job.get("error_category") == "auth_failure":
+                acc_id = str(job.get("business_account_id", "") or "")
+                if acc_id:
+                    account = SupabaseService.get_business_account(acc_id)
+                    if not account.get("is_connected", True):
+                        logger.warning(
+                            f"retry_dlq: skipping job {job_id} — account {acc_id} "
+                            f"still disconnected (auth_failure)"
+                        )
+                        skipped_disconnected += 1
+                        continue
             # Reset status to pending in Supabase first
             reset_ok = SupabaseService.update_outbound_job_status(
                 job_id,
@@ -96,6 +124,7 @@ async def retry_dlq(limit: int = Query(default=50, ge=1, le=200)):
             "status": "ok",
             "re_enqueued": re_enqueued,
             "failed": failed,
+            "skipped_disconnected": skipped_disconnected,
             "total": len(jobs),
         }
     except Exception as e:

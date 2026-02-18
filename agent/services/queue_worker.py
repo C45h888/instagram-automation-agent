@@ -330,7 +330,7 @@ class QueueWorker:
         retry_after_seconds → explicit delay from backend (overrides RETRY_DELAYS when set)
         """
         from services.supabase_service import SupabaseService
-        from routes.metrics import OUTBOUND_QUEUE_EXECUTE, OUTBOUND_QUEUE_RETRIES, OUTBOUND_QUEUE_DLQ
+        from routes.metrics import OUTBOUND_QUEUE_EXECUTE, OUTBOUND_QUEUE_RETRIES, OUTBOUND_QUEUE_DLQ, AUTH_FAILURE_DISCONNECTS
 
         job_id = job.get("job_id", "unknown")
         action_type = job.get("action_type", "unknown")
@@ -350,7 +350,7 @@ class QueueWorker:
                 f"[Worker] Job {job_id} non-retryable "
                 f"({error_category}): {error}"
             )
-            await asyncio.to_thread(OutboundQueue.move_to_dlq, job, reason=f"non_retryable:{error_category}:{error}")
+            await asyncio.to_thread(OutboundQueue.move_to_dlq, job, reason=f"non_retryable:{error_category}:{error}", error_category=error_category)
             await asyncio.to_thread(OutboundQueue.release_execution_lock, job_id)
 
             if action_type == "publish_post":
@@ -375,6 +375,8 @@ class QueueWorker:
                     "non_retryable": True,
                 },
             )
+            if error_category == "auth_failure":
+                await self._handle_auth_failure_disconnect(job, error)
             self._in_flight.discard(job_id)
             return
 
@@ -405,7 +407,7 @@ class QueueWorker:
         else:
             # Max retries exhausted — move to DLQ
             reason = f"max_retries_exceeded:{error_category}:{error}"
-            await asyncio.to_thread(OutboundQueue.move_to_dlq, job, reason)
+            await asyncio.to_thread(OutboundQueue.move_to_dlq, job, reason, error_category=error_category)
             await asyncio.to_thread(OutboundQueue.release_execution_lock, job_id)
 
             if action_type == "publish_post":
@@ -429,6 +431,8 @@ class QueueWorker:
                     "error_category": error_category,
                 },
             )
+            if error_category == "auth_failure":
+                await self._handle_auth_failure_disconnect(job, error)
 
         self._in_flight.discard(job_id)
 
@@ -447,3 +451,69 @@ class QueueWorker:
             {"publish_error": f"Queue DLQ after {job.get('retry_count')} retries: {error}"},
         )
         logger.error(f"publish_post settled as failed: post={scheduled_post_id} error={error}")
+
+    async def _handle_auth_failure_disconnect(self, job: dict, error: str) -> None:
+        """Side-effects when a job reaches DLQ with error_category='auth_failure'.
+
+        1. Marks the business account disconnected in Supabase
+        2. Creates a system alert for dashboard visibility
+        3. Logs a distinct audit event 'auth_failure_detected'
+        4. Increments AUTH_FAILURE_DISCONNECTS metric
+
+        Wrapped in try/except — a secondary failure here must never
+        affect the already-completed DLQ write.
+        """
+        from services.supabase_service import SupabaseService
+        from routes.metrics import AUTH_FAILURE_DISCONNECTS
+
+        job_id = job.get("job_id", "unknown")
+        action_type = job.get("action_type", "unknown")
+        business_account_id = job.get("business_account_id", "")
+
+        logger.error(
+            f"[Worker] AUTH FAILURE — account={business_account_id} "
+            f"job={job_id} action={action_type} error={error}"
+        )
+
+        try:
+            # 1. Mark account disconnected (stops all schedulers for this account)
+            await asyncio.to_thread(
+                SupabaseService.mark_account_disconnected,
+                business_account_id,
+            )
+
+            # 2. Create system alert (surfaces in dashboard)
+            await asyncio.to_thread(
+                SupabaseService.create_system_alert,
+                "auth_failure",
+                business_account_id,
+                f"Instagram auth token expired or revoked for account {business_account_id}",
+                {
+                    "job_id": job_id,
+                    "action_type": action_type,
+                    "error": error,
+                    "retry_count": job.get("retry_count", 0),
+                },
+            )
+
+            # 3. Distinct audit event (queryable via oversight brain)
+            await asyncio.to_thread(
+                SupabaseService.log_decision,
+                event_type="auth_failure_detected",
+                action="disconnect",
+                resource_type="instagram_business_account",
+                resource_id=business_account_id,
+                user_id=business_account_id,
+                details={
+                    "job_id": job_id,
+                    "action_type": action_type,
+                    "error": error,
+                    "source": job.get("source", ""),
+                },
+            )
+
+            # 4. Metric counter
+            AUTH_FAILURE_DISCONNECTS.labels(action_type=action_type).inc()
+
+        except Exception as e:
+            logger.error(f"_handle_auth_failure_disconnect secondary failure: {e}")
