@@ -1,6 +1,22 @@
+
+# ─── Secrets ───────────────────────────────────────────────
+.env
 agent/.env
-agent/.env.example
-agent/dockerfile
+
+# ─── Logs ──────────────────────────────────────────────────
+logs/
+*.log
+
+# ─── Python ────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ─── Docker build artefacts (agent-only dev file) ──────────
 agent/docker-compose.agent-only.yml
-agent/dockerfile
-agent/.env.example
+
+# ─── OS / Editor ────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
