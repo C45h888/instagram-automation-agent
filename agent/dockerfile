@@ -19,5 +19,5 @@ COPY . .
 
 EXPOSE 3002
 
-# Run with uvicorn (4 workers for 8 vCPU Hetzner box)
-CMD ["uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "3002", "--workers", "4", "--timeout-keep-alive", "30"]
+# Single async worker — APScheduler/QueueWorker are not process-safe
+CMD ["uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "3002", "--workers", "1", "--timeout-keep-alive", "30"]

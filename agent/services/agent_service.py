@@ -23,7 +23,7 @@ import time
 from config import llm, logger
 from tools import ALL_TOOLS
 from prompts import SYSTEM_PROMPT
-from routes.metrics import TOOL_CALLS, LLM_ERRORS
+from metrics import TOOL_CALLS, LLM_ERRORS
 
 # Configurable max concurrent LLM inferences (protects Ollama CPU)
 MAX_CONCURRENT_LLM = int(os.getenv("MAX_CONCURRENT_LLM", "4"))

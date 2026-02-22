@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import httpx
 
 from config import BACKEND_API_URL, HEARTBEAT_AGENT_ID
-from routes.metrics import HEARTBEAT_SENDS
+from metrics import HEARTBEAT_SENDS
 from services.supabase_service import SupabaseService
 
 logger = logging.getLogger(__name__)

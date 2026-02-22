@@ -91,10 +91,6 @@ def validate_schema():
             logger.warning(f"Optional table '{table}' not found — using default prompts")
 
 
-# Run startup checks
-verify_supabase_connection()
-validate_schema()
-
 # ================================
 # Ollama / Nemotron LLM
 # ================================

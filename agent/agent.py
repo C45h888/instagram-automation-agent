@@ -43,7 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
-from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, OUTBOUND_QUEUE_ENABLED, OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES, HEARTBEAT_ENABLED, HEARTBEAT_INTERVAL_MINUTES, HEARTBEAT_AGENT_ID, limiter, CORS_ALLOW_ORIGINS
+from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, OUTBOUND_QUEUE_ENABLED, OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES, HEARTBEAT_ENABLED, HEARTBEAT_INTERVAL_MINUTES, HEARTBEAT_AGENT_ID, limiter, CORS_ALLOW_ORIGINS, verify_supabase_connection, validate_schema
 from middleware import api_key_middleware
 from services.prompt_service import PromptService
 from scheduler.scheduler_service import SchedulerService
@@ -133,6 +133,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Scheduler: /engagement-monitor/*, /content-scheduler/*, /sales-attribution/*")
     logger.info(f"  Utility: /health, /metrics")
     logger.info("=" * 60)
+    # Verify Supabase once per process (moved from module-level in config.py)
+    await asyncio.to_thread(verify_supabase_connection)
+    await asyncio.to_thread(validate_schema)
     # Load prompts from DB (falls back to static defaults)
     PromptService.load()
     # Start schedulers (engagement monitor + content scheduler)

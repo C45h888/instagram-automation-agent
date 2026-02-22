@@ -22,7 +22,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from pybreaker import CircuitBreaker, CircuitBreakerError
 
 from config import supabase, logger
-from routes.metrics import DB_QUERY_COUNT, CACHE_HITS, CACHE_MISSES
+from metrics import DB_QUERY_COUNT, CACHE_HITS, CACHE_MISSES
 
 
 # ================================
