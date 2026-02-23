@@ -303,7 +303,7 @@ def _process_post_safe(run_id: str, post: dict, account: dict) -> dict:
         SupabaseService.log_decision(
             event_type="ugc_discovery_post_error",
             action="error",
-            resource_type="ugc_discovered",
+            resource_type="ugc_content",
             resource_id=run_id,
             user_id=account.get("id", ""),
             details={
@@ -374,51 +374,43 @@ def _process_post(run_id: str, post: dict, account: dict) -> dict:
             "run_id":            run_id,
         }
 
-        if True:  # always enters permission block when ugc_content_id is set
-            if not ugc_content_id:
-                logger.warning(
-                    f"[{run_id}] Skipping permission creation for @{post.get('username')} — "
-                    f"failed to create ugc_content record for media {media_id}"
+        if UGC_COLLECTION_AUTO_SEND_DM:
+            recipient_id = post.get("owner_id", "") or ""
+            if not recipient_id:
+                logger.info(
+                    f"DM skipped for @{post.get('username')} — "
+                    "no numeric owner_id in post data (backend search-hashtag must include owner{id})"
                 )
-            else:
-
-            if UGC_COLLECTION_AUTO_SEND_DM:
-                recipient_id = post.get("owner_id", "") or ""
-                if not recipient_id:
-                    logger.info(
-                        f"DM skipped for @{post.get('username')} — "
-                        "no numeric owner_id in post data (backend search-hashtag must include owner{id})"
-                    )
-                    permission_row["status"] = "expired"   # send impossible — closest valid status
-                    result["dm_sent"] = False
-                    SupabaseService.create_ugc_permission(permission_row)
-                else:
-                    # Create permission row first to get the ID for idempotency key
-                    permission_row["status"] = "pending"  # DM queued, worker will send
-                    created = SupabaseService.create_ugc_permission(permission_row)
-                    permission_id = created.get("id", "") if created else ""
-                    if permission_id:
-                        dm_result = send_permission_dm(
-                            business_account_id=account_id,
-                            recipient_id=recipient_id,
-                            recipient_username=post.get("username", ""),
-                            message_text=dm_text,
-                            permission_id=permission_id,
-                        )
-                        result["dm_sent"] = dm_result.get("success", False)
-                    else:
-                        logger.warning(f"Skipping DM enqueue — permission row creation failed for @{post.get('username')}")
-                        result["dm_sent"] = False
-            else:
-                result["dm_queued"] = True
+                permission_row["status"] = "expired"   # send impossible — closest valid status
+                result["dm_sent"] = False
                 SupabaseService.create_ugc_permission(permission_row)
+            else:
+                # Create permission row first to get the ID for idempotency key
+                permission_row["status"] = "pending"  # DM queued, worker will send
+                created = SupabaseService.create_ugc_permission(permission_row)
+                permission_id = created.get("id", "") if created else ""
+                if permission_id:
+                    dm_result = send_permission_dm(
+                        business_account_id=account_id,
+                        recipient_id=recipient_id,
+                        recipient_username=post.get("username", ""),
+                        message_text=dm_text,
+                        permission_id=permission_id,
+                    )
+                    result["dm_sent"] = dm_result.get("success", False)
+                else:
+                    logger.warning(f"Skipping DM enqueue — permission row creation failed for @{post.get('username')}")
+                    result["dm_sent"] = False
+        else:
+            result["dm_queued"] = True
+            SupabaseService.create_ugc_permission(permission_row)
 
     # Audit log
     SupabaseService.log_decision(
         event_type="ugc_discovery_post_processed",
         action=tier,
-        resource_type="ugc_discovered",
-        resource_id=ugc_discovered_id or run_id,
+        resource_type="ugc_content",
+        resource_id=ugc_content_id or run_id,
         user_id=account_id,
         details={
             "run_id": run_id,

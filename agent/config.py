@@ -77,8 +77,15 @@ def validate_schema():
         "attribution_review_queue": ["order_id", "review_status", "business_account_id"],
         "attribution_models": ["weights", "business_account_id"],
         "ugc_monitored_hashtags": ["business_account_id", "hashtag", "is_active"],
-        "ugc_discovered": ["business_account_id", "instagram_media_id", "quality_score", "quality_tier"],
-        "ugc_permissions": ["ugc_content_id", "business_account_id", "status"],
+        "ugc_content": [
+            "visitor_post_id", "business_account_id", "author_username",
+            "message", "media_type", "media_url", "quality_score",
+            "quality_tier", "source",
+        ],
+        "ugc_permissions": [
+            "ugc_content_id", "business_account_id", "status",
+            "request_message", "run_id",
+        ],
         "analytics_reports": ["business_account_id", "report_type", "report_date", "instagram_metrics", "insights"],
         "outbound_queue_jobs": ["job_id", "action_type", "priority", "endpoint", "payload", "status", "retry_count"],
         "system_alerts": ["business_account_id", "alert_type", "message", "details", "resolved"],
