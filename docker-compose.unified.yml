@@ -64,8 +64,8 @@ services:
   backend:
     container_name: instagram-backend
     build:
-      context: https://github.com/C45h888/instagram-automation-dashboard.git#main
-      dockerfile: backend.api/Dockerfile
+      context: https://github.com/C45h888/instagram-automation-dashboard.git#main:backend.api
+      dockerfile: Dockerfile
     restart: unless-stopped
     ports:
       - "3001:3001"

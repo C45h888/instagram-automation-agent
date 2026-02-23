@@ -854,7 +854,7 @@ class SupabaseService:
         try:
             result = _execute_query(
                 supabase.table("ugc_permissions")
-                .select("id, ugc_content_id")        # DB FK is ugc_content_id, no username column
+                .select("id, ugc_content_id")
                 .eq("business_account_id", business_account_id)
                 .eq("status", "granted"),
                 table="ugc_permissions",
@@ -1170,7 +1170,7 @@ class SupabaseService:
     # --------------------------------------------------
     @staticmethod
     def get_existing_ugc_ids(business_account_id: str) -> set:
-        """Fetch instagram_media_ids already in ugc_discovered for this account.
+        """Fetch visitor_post_ids already in ugc_content for this account.
 
         Used as authoritative dedup when Redis is unavailable.
         """
@@ -1179,13 +1179,13 @@ class SupabaseService:
 
         try:
             result = _execute_query(
-                supabase.table("ugc_discovered")
-                .select("instagram_media_id")
+                supabase.table("ugc_content")
+                .select("visitor_post_id")
                 .eq("business_account_id", business_account_id),
-                table="ugc_discovered",
+                table="ugc_content",
                 operation="select"
             )
-            return {row["instagram_media_id"] for row in (result.data or [])}
+            return {row["visitor_post_id"] for row in (result.data or [])}
 
         except CircuitBreakerError:
             logger.error("Circuit breaker OPEN — skipping existing UGC IDs fetch")
@@ -1195,89 +1195,38 @@ class SupabaseService:
             return set()
 
     # --------------------------------------------------
-    # WRITE: Create UGC Discovered (UGC Collection)
+    # WRITE: Create/Update UGC Content (UGC Collection)
     # --------------------------------------------------
     @staticmethod
-    def create_ugc_discovered(data: dict) -> dict:
-        """Upsert a discovered UGC post into ugc_discovered.
+    def create_or_update_ugc(data: dict) -> dict:
+        """Upsert a discovered UGC post into ugc_content.
 
-        Uses upsert on instagram_media_id to safely overwrite unscored rows
-        pre-populated by the backend's /sync-ugc endpoint.
+        Proxy-first pattern: backend writes raw row → agent upserts enrichment
+        onto the same row via the composite unique key (business_account_id, visitor_post_id).
 
         Expected data keys:
-          business_account_id, instagram_media_id, source, source_hashtag,
-          username, caption, media_type, media_url, permalink,
-          like_count, comments_count, quality_score, quality_tier,
-          quality_factors, post_timestamp, run_id
+          business_account_id, visitor_post_id, author_id, author_username,
+          message, media_type, media_url, permalink_url, like_count, comment_count,
+          created_time, source, quality_score, quality_tier, run_id
+        Returns full row including id (UUID needed for permissions FK).
         """
         if not supabase:
             return {}
 
         try:
             result = _execute_query(
-                supabase.table("ugc_discovered").upsert(data, on_conflict="instagram_media_id"),
-                table="ugc_discovered",
+                supabase.table("ugc_content").upsert(data, on_conflict="business_account_id,visitor_post_id"),
+                table="ugc_content",
                 operation="upsert"
             )
             return result.data[0] if result.data else {}
 
         except CircuitBreakerError:
-            logger.error("Circuit breaker OPEN — failed to create ugc_discovered")
+            logger.error("Circuit breaker OPEN — failed to create/update ugc_content")
             return {}
         except Exception as e:
-            logger.error(f"Failed to create ugc_discovered: {e}")
+            logger.error(f"Failed to create/update ugc_content: {e}")
             return {}
-
-    # --------------------------------------------------
-    # WRITE: Create UGC Permission (UGC Collection)
-    # --------------------------------------------------
-    @staticmethod
-    def create_or_get_ugc_content(
-        business_account_id: str,
-        instagram_media_id: str,
-        author_id: str,
-        author_username: str,
-        media_url: str,
-        media_type: str,
-        caption: str,
-        permalink: str,
-        like_count: int,
-        comment_count: int,
-        post_timestamp: str,
-    ) -> str | None:
-        """Upsert a ugc_content record (DB source of truth for permissions FK).
-
-        The ugc_permissions table requires a ugc_content_id FK to ugc_content.
-        This method upserts a minimal ugc_content row and returns the UUID.
-        Returns the ugc_content.id UUID, or None on failure.
-        """
-        if not supabase or not instagram_media_id:
-            return None
-        try:
-            result = _execute_query(
-                supabase.table("ugc_content")
-                .upsert({
-                    "business_account_id": business_account_id,
-                    "visitor_post_id": instagram_media_id,
-                    "author_id": author_id or "",
-                    "author_username": author_username,
-                    "message": caption[:2000] if caption else None,
-                    "permalink_url": permalink or "",
-                    "media_type": media_type or "IMAGE",
-                    "media_url": media_url,
-                    "like_count": like_count or 0,
-                    "comment_count": comment_count or 0,
-                    "created_time": post_timestamp or datetime.now(timezone.utc).isoformat(),
-                }, on_conflict="visitor_post_id")
-                .select("id")
-                .single(),
-                table="ugc_content",
-                operation="upsert",
-            )
-            return result.data["id"] if result.data else None
-        except Exception as e:
-            logger.error(f"Failed to create ugc_content for {instagram_media_id}: {e}")
-            return None
 
     @staticmethod
     def create_ugc_permission(data: dict) -> dict:
@@ -1285,7 +1234,7 @@ class SupabaseService:
 
         Expected data keys:
           ugc_content_id (FK to ugc_content.id), business_account_id,
-          dm_message_text, status (pending/granted/denied/expired), run_id
+          request_message, status (pending/granted/denied/expired), run_id
         """
         if not supabase:
             return {}
@@ -1355,18 +1304,18 @@ class SupabaseService:
             return {}
 
         try:
-            query = supabase.table("ugc_discovered").select("id", count="exact")
+            query = supabase.table("ugc_content").select("id", count="exact")
             if business_account_id:
                 query = query.eq("business_account_id", business_account_id)
-            result = _execute_query(query, table="ugc_discovered", operation="select")
+            result = _execute_query(query, table="ugc_content", operation="select")
             total = result.count or 0
 
             tiers = {}
             for tier in ("high", "moderate"):
-                q = supabase.table("ugc_discovered").select("id", count="exact").eq("quality_tier", tier)
+                q = supabase.table("ugc_content").select("id", count="exact").eq("quality_tier", tier)
                 if business_account_id:
                     q = q.eq("business_account_id", business_account_id)
-                r = _execute_query(q, table="ugc_discovered", operation="select")
+                r = _execute_query(q, table="ugc_content", operation="select")
                 tiers[tier] = r.count or 0
 
             return {"total_discovered": total, "by_tier": tiers}
@@ -1501,9 +1450,16 @@ class SupabaseService:
     # --------------------------------------------------
     @staticmethod
     def queue_for_review(data: dict) -> dict:
-        """Insert an attribution that needs manual review."""
+        """Insert an attribution that needs manual review.
+
+        fraud_risk must be boolean. Coerces strings defensively.
+        """
         if not supabase:
             return {}
+
+        # Coerce fraud_risk to boolean — DB column is boolean, not text
+        if "fraud_risk" in data and not isinstance(data["fraud_risk"], bool):
+            data = {**data, "fraud_risk": data["fraud_risk"] not in ("low", "none", False, None, "")}
 
         try:
             result = _execute_query(

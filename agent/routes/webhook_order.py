@@ -275,6 +275,7 @@ async def process_order_webhook(request: Request):
 
         # If not approved, also queue for review
         if not is_approved:
+            fraud_risk_raw = evaluation.get("fraud_risk", "low")
             SupabaseService.queue_for_review({
                 "order_id": order_id,
                 "order_value": order.get("order_value", 0),
@@ -282,7 +283,7 @@ async def process_order_webhook(request: Request):
                 "attribution_score": model_scores.get("final_weighted", 0),
                 "quality_score": evaluation.get("quality_score", 0),
                 "concerns": evaluation.get("concerns", []),
-                "fraud_risk": evaluation.get("fraud_risk", "low"),
+                "fraud_risk": fraud_risk_raw not in ("low", "none", False, None, ""),  # cast to bool
                 "full_attribution_data": result,
                 "business_account_id": business_account_id,
             })

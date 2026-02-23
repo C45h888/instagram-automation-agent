@@ -333,69 +333,54 @@ def _process_post(run_id: str, post: dict, account: dict) -> dict:
         UgcDedupService.mark_processed(media_id)
         return {"action": "discarded", "media_id": media_id, "score": score}
 
-    # Store in ugc_discovered (both high and moderate)
+    # Single write to ugc_content (both high and moderate tiers)
     ugc_row = {
         "business_account_id": account_id,
-        "instagram_media_id": media_id,
-        "source": post.get("_source", "unknown"),
-        "source_hashtag": post.get("_source_hashtag"),
-        "username": post.get("username", ""),
-        "caption": (post.get("caption") or "")[:2000],
-        "media_type": post.get("media_type", ""),
-        "media_url": post.get("media_url", ""),
-        "permalink": post.get("permalink", ""),
-        "like_count": post.get("like_count", 0) or 0,
-        "comments_count": post.get("comments_count", 0) or 0,
-        "quality_score": score,
-        "quality_tier": tier,
-        "quality_factors": factors,
-        "post_timestamp": post.get("timestamp"),
-        "run_id": run_id,
+        "visitor_post_id":     media_id,
+        "author_id":           post.get("owner_id", "") or "",
+        "author_username":     post.get("username", ""),
+        "message":             (post.get("caption") or "")[:2000],
+        "media_type":          post.get("media_type", "IMAGE"),
+        "media_url":           post.get("media_url", ""),
+        "permalink_url":       post.get("permalink", ""),
+        "like_count":          post.get("like_count", 0) or 0,
+        "comment_count":       post.get("comments_count", 0) or 0,
+        "created_time":        post.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+        "source":              post.get("_source", "unknown"),
+        "quality_score":       score,
+        "quality_tier":        tier,
+        "run_id":              run_id,
     }
-    ugc_record = SupabaseService.create_ugc_discovered(ugc_row)
-    ugc_discovered_id = ugc_record.get("id", "")
+    ugc_record = SupabaseService.create_or_update_ugc(ugc_row)
+    ugc_content_id = ugc_record.get("id", "")
 
     UgcDedupService.mark_processed(media_id)
 
     result = {"action": tier, "media_id": media_id, "score": score}
 
     # High quality: create permission request + optionally send DM
-    if tier == "high" and ugc_discovered_id:
+    if tier == "high" and ugc_content_id:
         dm_text = compose_dm_message(
             username=post.get("username", ""),
             brand_username=account_username,
             post_permalink=post.get("permalink", ""),
         )
 
-        # ugc_permissions requires ugc_content_id FK to ugc_content.
-        # Upsert a ugc_content record first, then use its UUID.
-        ugc_content_id = SupabaseService.create_or_get_ugc_content(
-            business_account_id=account_id,
-            instagram_media_id=media_id,
-            author_id=post.get("owner_id", "") or "",
-            author_username=post.get("username", ""),
-            media_url=post.get("media_url", ""),
-            media_type=post.get("media_type", "IMAGE"),
-            caption=(post.get("caption") or "")[:2000],
-            permalink=post.get("permalink", ""),
-            like_count=post.get("like_count", 0) or 0,
-            comment_count=post.get("comments_count", 0) or 0,
-            post_timestamp=post.get("timestamp") or datetime.now(timezone.utc).isoformat(),
-        )
+        permission_row = {
+            "ugc_content_id":    ugc_content_id,
+            "business_account_id": account_id,
+            "request_message":   dm_text,
+            "status":            "pending",
+            "run_id":            run_id,
+        }
 
-        if not ugc_content_id:
-            logger.warning(
-                f"[{run_id}] Skipping permission creation for @{post.get('username')} — "
-                f"failed to create ugc_content record for media {media_id}"
-            )
-        else:
-            permission_row = {
-                "ugc_content_id": ugc_content_id,  # FK to ugc_content (not ugc_discovered)
-                "business_account_id": account_id,
-                "dm_message_text": dm_text,
-                "status": "pending",    # DB check: pending/granted/denied/expired only
-                "run_id": run_id,
-            }
+        if True:  # always enters permission block when ugc_content_id is set
+            if not ugc_content_id:
+                logger.warning(
+                    f"[{run_id}] Skipping permission creation for @{post.get('username')} — "
+                    f"failed to create ugc_content record for media {media_id}"
+                )
+            else:
 
             if UGC_COLLECTION_AUTO_SEND_DM:
                 recipient_id = post.get("owner_id", "") or ""
