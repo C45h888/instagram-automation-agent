@@ -29,7 +29,7 @@ failure never crashes the batch.
 import asyncio
 import time
 import uuid as uuid_mod
-from datetime import datetime, timezone
+
 
 from config import (
     logger,
@@ -41,6 +41,7 @@ from config import (
 )
 from services.supabase_service import SupabaseService
 from scheduler.ugc_dedup_service import UgcDedupService
+from ugc_field_map import map_scored_post_to_ugc_content
 from tools.ugc_tools import (
     score_ugc_quality,
     fetch_hashtag_media,
@@ -334,23 +335,7 @@ def _process_post(run_id: str, post: dict, account: dict) -> dict:
         return {"action": "discarded", "media_id": media_id, "score": score}
 
     # Single write to ugc_content (both high and moderate tiers)
-    ugc_row = {
-        "business_account_id": account_id,
-        "visitor_post_id":     media_id,
-        "author_id":           post.get("owner_id", "") or "",
-        "author_username":     post.get("username", ""),
-        "message":             (post.get("caption") or "")[:2000],
-        "media_type":          post.get("media_type", "IMAGE"),
-        "media_url":           post.get("media_url", ""),
-        "permalink_url":       post.get("permalink", ""),
-        "like_count":          post.get("like_count", 0) or 0,
-        "comment_count":       post.get("comments_count", 0) or 0,
-        "created_time":        post.get("timestamp") or datetime.now(timezone.utc).isoformat(),
-        "source":              post.get("_source", "unknown"),
-        "quality_score":       score,
-        "quality_tier":        tier,
-        "run_id":              run_id,
-    }
+    ugc_row = map_scored_post_to_ugc_content(post, account_id, score, tier, factors, run_id)
     ugc_record = SupabaseService.create_or_update_ugc(ugc_row)
     ugc_content_id = ugc_record.get("id", "")
 
