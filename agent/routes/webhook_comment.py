@@ -128,7 +128,23 @@ def _execute_reply(parsed: CommentWebhookData, analysis: dict) -> dict:
 
 
 def _build_audit_details(parsed: CommentWebhookData, analysis: dict, exec_result: dict, latency: int) -> dict:
-    """Build audit log details."""
+    """Build audit log details and write-through to instagram_comments (RC-A/RC-D fix).
+
+    Upserts the comment with processed_by_automation=True so the engagement monitor's
+    get_unprocessed_comments() query skips it on the next batch cycle, eliminating
+    the duplicate-reply race condition.
+    """
+    SupabaseService.upsert_webhook_comment(
+        instagram_comment_id=parsed.comment_id,
+        media_instagram_id=parsed.post_id,
+        business_account_id=parsed.business_account_id,
+        text=parsed.comment_text,
+        author_username=parsed.commenter_username,
+        author_instagram_id=parsed.commenter_id,
+        created_at=parsed.timestamp,
+        automated_response_sent=exec_result.get("executed", False),
+        response_text=exec_result.get("reply_sent"),
+    )
     return {
         "comment_text": parsed.comment_text[:200],
         "commenter": parsed.commenter_username,

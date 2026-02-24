@@ -146,10 +146,10 @@ async def _process_account(run_id: str, account: dict) -> dict:
         logger.debug(f"[{run_id}] @{account_username}: no unprocessed comments")
         return stats
 
-    # Filter through Redis dedup (fast path)
+    # Filter through Redis dedup (fast path — per-account key)
     unprocessed = [
         c for c in comments
-        if not DedupService.is_processed(c.get("instagram_comment_id", ""))
+        if not DedupService.is_processed(c.get("instagram_comment_id", ""), account_id)
     ]
 
     if not unprocessed:
@@ -249,7 +249,7 @@ def _handle_escalation(run_id: str, comment: dict, account: dict, analysis: dict
     instagram_comment_id = comment.get("instagram_comment_id", "")
 
     SupabaseService.mark_comment_processed(comment_id, was_replied=False)
-    DedupService.mark_processed(instagram_comment_id)
+    DedupService.mark_processed(instagram_comment_id, account.get("id", ""))
 
     SupabaseService.log_decision(
         event_type="engagement_monitor_escalation",
@@ -301,7 +301,7 @@ def _handle_auto_reply(
         response_text=suggested_reply if was_replied else None,
         was_replied=was_replied,
     )
-    DedupService.mark_processed(instagram_comment_id)
+    DedupService.mark_processed(instagram_comment_id, account.get("id", ""))
 
     # Feedback loop: log execution outcome for pattern learning
     _log_execution_outcome(run_id, comment, result, account)
@@ -343,7 +343,7 @@ def _handle_skip(run_id: str, comment: dict, account: dict, analysis: dict) -> d
     instagram_comment_id = comment.get("instagram_comment_id", "")
 
     SupabaseService.mark_comment_processed(comment_id, was_replied=False)
-    DedupService.mark_processed(instagram_comment_id)
+    DedupService.mark_processed(instagram_comment_id, account.get("id", ""))
 
     SupabaseService.log_decision(
         event_type="engagement_monitor_comment_processed",
@@ -411,7 +411,7 @@ def _log_comment_error(run_id: str, comment: dict, account: dict, error: Excepti
 
     # Still mark as processed to prevent infinite retry loops
     SupabaseService.mark_comment_processed(comment_id, was_replied=False)
-    DedupService.mark_processed(comment.get("instagram_comment_id", ""))
+    DedupService.mark_processed(comment.get("instagram_comment_id", ""), account.get("id", ""))
 
     SupabaseService.log_decision(
         event_type="engagement_monitor_comment_error",

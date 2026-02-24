@@ -712,7 +712,7 @@ class SupabaseService:
                 "business_account_id": business_account_id,
                 "created_at": c.get("timestamp"),
                 "like_count": c.get("like_count", 0) or 0,
-                "processed_by_automation": False,   # fresh — not yet processed
+                # processed_by_automation omitted — DB DEFAULT false on insert, preserved on update
             }
             for c in comments if c.get("id")
         ]
@@ -788,6 +788,117 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Failed to save live conversations: {e}")
             return 0
+
+    # --------------------------------------------------
+    # WRITE: Upsert Webhook Comment (Real-Time Path A)
+    # --------------------------------------------------
+    @staticmethod
+    def upsert_webhook_comment(
+        instagram_comment_id: str,
+        media_instagram_id: str,
+        business_account_id: str,
+        text: str,
+        author_username: str,
+        author_instagram_id: str,
+        created_at: str,
+        automated_response_sent: bool = False,
+        response_text: str | None = None,
+    ) -> bool:
+        """Write a real-time webhook comment into instagram_comments with processed_by_automation=True.
+
+        Called by webhook_comment.py after analysis so the engagement monitor's
+        get_unprocessed_comments() query never picks up this event on the next batch cycle.
+        Also feeds the attribution engagement query.
+
+        Resolves the Supabase media UUID via instagram_media_id (mirrors save_live_comments pattern).
+        processed_by_automation is always True here — this is the write-through for Path A events.
+        """
+        if not supabase or not instagram_comment_id:
+            return False
+        try:
+            # Resolve media UUID (row may be a stub created by ensureMediaRecord)
+            media_result = _execute_query(
+                supabase.table("instagram_media")
+                .select("id")
+                .eq("instagram_media_id", media_instagram_id)
+                .limit(1),
+                table="instagram_media",
+                operation="select",
+            )
+            media_uuid = media_result.data[0]["id"] if media_result.data else None
+
+            record: dict = {
+                "instagram_comment_id": instagram_comment_id,
+                "text": (text or "")[:2000],
+                "author_username": author_username or "",
+                "author_instagram_id": author_instagram_id or None,
+                "media_id": media_uuid,
+                "business_account_id": business_account_id,
+                "created_at": created_at,
+                "processed_by_automation": True,
+                "automated_response_sent": automated_response_sent,
+            }
+            if response_text:
+                record["response_text"] = response_text[:2200]
+
+            _execute_query(
+                supabase.table("instagram_comments")
+                .upsert(record, on_conflict="instagram_comment_id"),
+                table="instagram_comments",
+                operation="upsert",
+            )
+            return True
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to upsert webhook comment")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to upsert webhook comment {instagram_comment_id}: {e}")
+            return False
+
+    # --------------------------------------------------
+    # WRITE: Upsert DM Conversation (Real-Time Path A)
+    # --------------------------------------------------
+    @staticmethod
+    def upsert_webhook_dm_conversation(
+        sender_id: str,
+        business_account_id: str,
+        timestamp: str,
+    ) -> bool:
+        """Create or refresh a DM conversation row when a real-time DM webhook fires.
+
+        Sets within_window=True and window_expires_at=now+24h because the sender
+        just messaged us — we are definitively inside the Meta 24h reply window.
+        Conflict key: (business_account_id, customer_instagram_id).
+
+        Called by webhook_dm.py _fetch_context() before get_dm_conversation_context()
+        so that _pre_execute_check() always finds an up-to-date row.
+        """
+        if not supabase or not sender_id or not business_account_id:
+            return False
+        try:
+            from datetime import timedelta
+            now = datetime.now(timezone.utc)
+            record = {
+                "customer_instagram_id": sender_id,
+                "business_account_id": business_account_id,
+                "within_window": True,
+                "window_expires_at": (now + timedelta(hours=24)).isoformat(),
+                "last_message_at": timestamp or now.isoformat(),
+                "conversation_status": "active",
+            }
+            _execute_query(
+                supabase.table("instagram_dm_conversations")
+                .upsert(record, on_conflict="business_account_id,customer_instagram_id"),
+                table="instagram_dm_conversations",
+                operation="upsert",
+            )
+            return True
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to upsert DM conversation")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to upsert DM conversation for {sender_id}: {e}")
+            return False
 
     # --------------------------------------------------
     # WRITE: Save Live Conversation Messages (Live Fetch Write-Through)
@@ -1399,25 +1510,85 @@ class SupabaseService:
         except Exception as e:
             logger.warning(f"Failed to fetch customer history for {email}: {e}")
 
-        # Query 2: Recent Instagram engagements
+        # Query 2: Account-level engagement signals from two real tables.
+        # instagram_engagements does not exist — we route to the tables that hold
+        # the equivalent data. Not customer-email-specific (IG API never exposes email);
+        # represents account engagement patterns during the attribution window.
         eng_cutoff = (datetime.now(timezone.utc) - timedelta(days=engagement_days)).isoformat()
+        comment_engagements: list = []
+        dm_engagements: list = []
+
+        # Sub-query A: Top-level customer comments (instagram_comments)
         try:
-            result = _execute_query(
-                supabase.table("instagram_engagements")
-                .select("engagement_type, content_id, post_id, timestamp, metadata")
-                .eq("customer_email", email)
+            result_comments = _execute_query(
+                supabase.table("instagram_comments")
+                .select("instagram_comment_id, media_id, published_at, sentiment, category, text")
                 .eq("business_account_id", business_account_id)
-                .gte("timestamp", eng_cutoff)
-                .order("timestamp", desc=False)
-                .limit(100),
-                table="instagram_engagements",
+                .not_.is_("published_at", "null")    # only rows with real IG timestamp
+                .gte("published_at", eng_cutoff)
+                .is_("parent_comment_id", "null")     # top-level only — exclude reply chains
+                .order("published_at", desc=False)
+                .limit(75),
+                table="instagram_comments",
                 operation="select"
             )
-            engagements = result.data or []
+            comment_engagements = [
+                {
+                    "engagement_type": "comment",
+                    "content_id": r.get("instagram_comment_id", ""),
+                    "post_id":    r.get("media_id", ""),   # Supabase UUID (best available link)
+                    "timestamp":  r.get("published_at", ""),
+                    "metadata": {
+                        "sentiment":    r.get("sentiment"),
+                        "category":     r.get("category"),
+                        "text_preview": (r.get("text") or "")[:100],
+                    },
+                }
+                for r in (result_comments.data or [])
+            ]
         except CircuitBreakerError:
-            logger.error("Circuit breaker OPEN — skipping recent engagements fetch")
+            logger.error("Circuit breaker OPEN — skipping instagram_comments engagements fetch")
         except Exception as e:
-            logger.warning(f"Failed to fetch engagements for {email}: {e}")
+            logger.warning(f"Failed to fetch comment engagements for {business_account_id}: {e}")
+
+        # Sub-query B: DM conversations active in the engagement window
+        try:
+            result_convs = _execute_query(
+                supabase.table("instagram_dm_conversations")
+                .select("customer_instagram_id, customer_username, first_message_at, "
+                        "last_message_at, message_count, last_message_preview")
+                .eq("business_account_id", business_account_id)
+                .not_.is_("last_message_at", "null")
+                .gte("last_message_at", eng_cutoff)
+                .order("first_message_at", desc=False)
+                .limit(25),
+                table="instagram_dm_conversations",
+                operation="select"
+            )
+            dm_engagements = [
+                {
+                    "engagement_type": "dm",
+                    "content_id": r.get("customer_instagram_id", ""),
+                    "post_id":    "",
+                    "timestamp":  r.get("first_message_at") or r.get("last_message_at", ""),
+                    "metadata": {
+                        "message_count":     r.get("message_count", 0),
+                        "last_preview":      (r.get("last_message_preview") or "")[:100],
+                        "customer_username": r.get("customer_username"),
+                    },
+                }
+                for r in (result_convs.data or [])
+            ]
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping DM conversation engagements fetch")
+        except Exception as e:
+            logger.warning(f"Failed to fetch DM engagements for {business_account_id}: {e}")
+
+        # Merge both sources, sorted by timestamp ascending (journey chronology)
+        engagements = sorted(
+            comment_engagements + dm_engagements,
+            key=lambda e: e.get("timestamp", ""),
+        )[:100]
 
         return {"history": history, "engagements": engagements}
 

@@ -99,7 +99,16 @@ def _hard_rules(parsed: DMWebhookData, request: Request) -> Optional[dict]:
 
 
 def _fetch_context(parsed: DMWebhookData) -> dict:
-    """Fetch account, DM history, and conversation context."""
+    """Fetch account, DM history, and conversation context.
+
+    Write-through: upsert the conversation row first so within_window=True is
+    set before _pre_execute_check() reads it back (RC-C fix).
+    """
+    SupabaseService.upsert_webhook_dm_conversation(
+        sender_id=parsed.sender_id,
+        business_account_id=parsed.business_account_id,
+        timestamp=parsed.timestamp,
+    )
     return {
         "account": SupabaseService.get_account_info(parsed.business_account_id),
         "dm_history": SupabaseService.get_dm_history(parsed.sender_id, parsed.business_account_id),
@@ -135,7 +144,7 @@ def _pre_execute_check(parsed: DMWebhookData, analysis: dict) -> Optional[dict]:
         parsed.business_account_id
     )
 
-    within_window = conv_ctx.get("within_window", False)
+    within_window = conv_ctx.get("within_window", True)
 
     if not within_window:
         return {

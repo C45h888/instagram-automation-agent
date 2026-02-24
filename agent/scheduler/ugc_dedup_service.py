@@ -4,8 +4,8 @@ UGC Deduplication Service
 Redis-backed fast deduplication for UGC discovery.
 Prevents processing the same Instagram media ID twice across scheduler cycles.
 
-Primary dedup: Supabase `ugc_discovered` table unique constraint on
-(business_account_id, instagram_media_id).
+Primary dedup: Supabase `ugc_content` table unique constraint on
+(business_account_id, visitor_post_id).
 Secondary dedup: Redis set as fast-path cache (avoids re-querying Supabase for
 posts already processed in recent cycles).
 

@@ -16,8 +16,8 @@ Flow per cycle:
      d. Merge both streams, deduplicate via Redis + DB
      e. Score each post (pure Python, 0-95)
      f. Route by tier:
-        - high (>=70): store in ugc_discovered, create ugc_permission, optionally send DM
-        - moderate (41-69): store in ugc_discovered for manual review
+        - high (>=70): store in ugc_content, create ugc_permission, optionally send DM
+        - moderate (41-69): store in ugc_content for manual review
         - low (<=40): discard
      g. Log decisions to audit_log
   3. Log batch summary + update Prometheus metrics
