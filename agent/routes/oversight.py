@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from config import limiter, OVERSIGHT_RATE_LIMIT, OVERSIGHT_STREAM_ENABLED
+from config import SSE_RESPONSE_HEADERS
 from services.oversight_brain import chat as oversight_chat, astream_chat as oversight_stream_chat
 from routes.metrics import OVERSIGHT_CHAT_QUERIES, REQUEST_COUNT, REQUEST_LATENCY
 from config import logger
@@ -100,7 +101,7 @@ async def chat_endpoint(request_body: ChatRequest, request: Request):
             ),
             media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                **SSE_RESPONSE_HEADERS,
                 "X-Request-ID": request_id,
             },
         )

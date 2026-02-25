@@ -23,6 +23,7 @@ from pybreaker import CircuitBreaker, CircuitBreakerError
 
 from config import supabase, logger
 from metrics import DB_QUERY_COUNT, CACHE_HITS, CACHE_MISSES
+from services.validation import PostSelectionFactors, AgentModifications, AttributionModelWeightsModel
 
 
 # ================================
@@ -1124,6 +1125,20 @@ class SupabaseService:
         if not supabase:
             return {}
 
+        # Validate JSONB columns before write
+        if selection_factors:
+            try:
+                PostSelectionFactors(**selection_factors)
+            except Exception as e:
+                logger.warning(f"Invalid selection_factors, writing anyway: {e}")
+
+        mods = evaluation_data.get("modifications")
+        if mods and isinstance(mods, dict):
+            try:
+                AgentModifications(**mods)
+            except Exception as e:
+                logger.warning(f"Invalid agent_modifications, writing anyway: {e}")
+
         row = {
             "business_account_id": business_account_id,
             "run_id": run_id,
@@ -1698,6 +1713,12 @@ class SupabaseService:
         """
         if not supabase or not business_account_id:
             return False
+
+        # Validate weights shape before write
+        try:
+            AttributionModelWeightsModel(**weights)
+        except Exception as e:
+            logger.warning(f"Invalid attribution model weights, writing anyway: {e}")
 
         row = {
             "business_account_id": business_account_id,

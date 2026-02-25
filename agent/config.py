@@ -180,6 +180,13 @@ OVERSIGHT_STREAM_ENABLED = os.getenv("OVERSIGHT_STREAM_ENABLED", "true").lower()
 OVERSIGHT_AUTO_CONTEXT_LIMIT = int(os.getenv("OVERSIGHT_AUTO_CONTEXT_LIMIT", "12"))
 OVERSIGHT_LLM_TIMEOUT_SECONDS = int(os.getenv("OVERSIGHT_LLM_TIMEOUT_SECONDS", "15"))
 
+# SSE response headers — must match backend.api/routes/agents/oversight.js
+SSE_RESPONSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+    "Connection": "keep-alive",
+}
+
 # ================================
 # Rate Limiter (shared instance — import in routes for @limiter.limit())
 # ================================

@@ -260,6 +260,11 @@ async def generate_and_evaluate(
     # Apply hard rules on top of LLM evaluation
     result = _apply_hard_rules(result)
 
+    # Ensure agent_modifications.reason is always populated (dashboard Zod requires non-empty)
+    mods = result.get("modifications")
+    if mods and isinstance(mods, dict) and not mods.get("reason"):
+        mods["reason"] = (result.get("reasoning") or "Agent-generated modification")[:200]
+
     return result
 
 

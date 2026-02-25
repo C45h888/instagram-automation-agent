@@ -72,3 +72,54 @@ class ExecutionOutcome(BaseModel):
     instagram_response: Optional[dict] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+
+
+# ================================
+# JSONB Column Models (agent-writable tables)
+# These mirror the TypeScript interfaces + Zod schemas in the dashboard.
+# SYNC: src/types/agent-tables.ts
+# ================================
+
+class PostSelectionFactors(BaseModel):
+    """scheduled_posts.selection_factors — SYNC: agent-tables.ts PostSelectionFactors"""
+    visual_quality: Optional[float] = Field(None, ge=0, le=100)
+    engagement_potential: Optional[float] = Field(None, ge=0, le=100)
+    brand_alignment: Optional[float] = Field(None, ge=0, le=100)
+    recency: Optional[float] = Field(None, ge=0, le=100)
+    uniqueness: Optional[float] = Field(None, ge=0, le=100)
+
+    class Config:
+        extra = "allow"  # Content tools may add scoring-specific keys
+
+
+class AgentModifications(BaseModel):
+    """scheduled_posts.agent_modifications — SYNC: agent-tables.ts AgentModifications"""
+    caption: Optional[str] = None
+    hook: Optional[str] = None
+    body: Optional[str] = None
+    cta: Optional[str] = None
+    hashtags: Optional[list[str]] = None
+    reason: str = Field(..., min_length=1)
+
+    class Config:
+        extra = "allow"
+
+
+class AttributionModelWeightsModel(BaseModel):
+    """attribution_models.weights — SYNC: agent-tables.ts AttributionModelWeights"""
+    first_touch: float = Field(..., ge=0, le=1)
+    last_touch: float = Field(..., ge=0, le=1)
+    linear: float = Field(..., ge=0, le=1)
+    time_decay: float = Field(..., ge=0, le=1)
+
+
+class AttributionPerformanceMetricsModel(BaseModel):
+    """attribution_models.performance_metrics — SYNC: agent-tables.ts AttributionPerformanceMetrics"""
+    accuracy: Optional[float] = None
+    precision: Optional[float] = None
+    recall: Optional[float] = None
+    last_evaluated: Optional[str] = None
+    sample_size: Optional[int] = None
+
+    class Config:
+        extra = "allow"
