@@ -74,7 +74,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - AGENT_URL=http://langchain-agent:3002    # Docker-internal: backend → agent
+      - AGENT_URL=${AGENT_URL:-http://langchain-agent:3002}    # Docker-internal: backend → agent (override in .env for production)
     volumes:
       - backend-logs:/app/logs                   # named volume, not host path
     networks:
@@ -107,11 +107,12 @@ services:
       - "3002:3002"
     env_file:
       - .env
+      - .env.production
     environment:
       - OLLAMA_HOST=http://ollama:11434           # Docker-internal: agent → ollama
       - REDIS_HOST=redis                          # Docker-internal: agent → redis
       - REDIS_PORT=6379
-      - BACKEND_API_URL=http://backend:3001       # Docker-internal: agent → backend
+      - BACKEND_API_URL=${BACKEND_API_URL:-http://backend:3001}  # Agent → backend calls
     depends_on:
       ollama:
         condition: service_healthy

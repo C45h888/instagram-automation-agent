@@ -55,18 +55,18 @@ class AgentService:
         async with _llm_semaphore:
             return await self._analyze(prompt)
 
-    async def astream_analyze(self, prompt: str):
+    async def astream_analyze(self, prompt: str, on_event=None):
         """Async streaming entry point with semaphore-limited concurrency.
 
-        Yields raw text chunks from the LLM.
-        Tool execution happens in the non-streaming first pass (if tools called).
-        Final answer generation is streamed.
+        Args:
+            prompt: Prompt to send to LLM
+            on_event: Optional async callback(event: dict) for tool_call/tool_done events
 
         Yields:
             str: Text chunks from the LLM response
         """
         async with _llm_semaphore:
-            async for chunk in self._astream(prompt):
+            async for chunk in self._astream(prompt, on_event=on_event):
                 yield chunk
 
     async def _analyze(self, prompt: str) -> dict:
@@ -120,12 +120,16 @@ class AgentService:
                 "_latency_ms": latency_ms,
             }
 
-    async def _astream(self, prompt: str):
+    async def _astream(self, prompt: str, on_event=None):
         """Async streaming LLM invocation with tool support.
+
+        Args:
+            prompt: Prompt to send to LLM
+            on_event: Optional async callback(event: dict) for tool events
 
         Flow:
           1. Non-streaming invoke to detect tool calls
-          2. If tools called, execute them, then stream follow-up
+          2. If tools called, emit events and execute them, then stream follow-up
           3. If no tools, stream directly (yield the already-complete initial response)
         """
         start_time = time.time()
@@ -138,10 +142,31 @@ class AgentService:
             result = await asyncio.to_thread(self.llm_with_tools.invoke, full_prompt)
             tool_calls = getattr(result, "tool_calls", [])
 
-            # Step 2: Execute tool calls in parallel if any
+            # Step 2: Execute tool calls with event emission
             tool_outputs = {}
             if tool_calls:
+                # Emit tool_call events before execution
+                for call in tool_calls:
+                    tool_name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+                    if on_event:
+                        await on_event({
+                            "event_type": "tool_call",
+                            "tool_name": tool_name,
+                        })
+
+                tool_start = time.time()
                 tool_outputs = await self._execute_tool_calls_async(tool_calls)
+                tool_elapsed_ms = int((time.time() - tool_start) * 1000)
+
+                # Emit tool_done events after execution
+                for call in tool_calls:
+                    tool_name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+                    if on_event:
+                        await on_event({
+                            "event_type": "tool_done",
+                            "tool_name": tool_name,
+                            "elapsed_ms": tool_elapsed_ms,
+                        })
 
                 # If tools were called, stream the follow-up with tool context
                 if tool_outputs:

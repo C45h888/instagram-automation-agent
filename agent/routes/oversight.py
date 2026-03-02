@@ -91,6 +91,12 @@ async def chat_endpoint(request_body: ChatRequest, request: Request):
     # Streaming path
     if request_body.stream and OVERSIGHT_STREAM_ENABLED:
         OVERSIGHT_CHAT_QUERIES.labels(status="stream_started").inc()
+        
+        # Read Last-Event-ID header for resume support
+        last_event_id = request.headers.get("Last-Event-ID", None)
+        if last_event_id:
+            logger.info(f"[{request_id}] Client reconnecting with Last-Event-ID: {last_event_id}")
+        
         return StreamingResponse(
             oversight_stream_chat(
                 question=request_body.question,
@@ -98,6 +104,7 @@ async def chat_endpoint(request_body: ChatRequest, request: Request):
                 chat_history=request_body.chat_history,
                 user_id=request_body.user_id,
                 request_id=request_id,
+                request=request,  # Pass request for disconnect detection
             ),
             media_type="text/event-stream",
             headers={

@@ -180,11 +180,16 @@ OVERSIGHT_STREAM_ENABLED = os.getenv("OVERSIGHT_STREAM_ENABLED", "true").lower()
 OVERSIGHT_AUTO_CONTEXT_LIMIT = int(os.getenv("OVERSIGHT_AUTO_CONTEXT_LIMIT", "12"))
 OVERSIGHT_LLM_TIMEOUT_SECONDS = int(os.getenv("OVERSIGHT_LLM_TIMEOUT_SECONDS", "15"))
 
+# SSE Hardening (Phase 1)
+SSE_HEARTBEAT_INTERVAL_SECONDS = int(os.getenv("SSE_HEARTBEAT_INTERVAL_SECONDS", "10"))
+SSE_MAX_RECONNECT_WINDOW_SECONDS = int(os.getenv("SSE_MAX_RECONNECT_WINDOW_SECONDS", "300"))
+
 # SSE response headers — must match backend.api/routes/agents/oversight.js
 SSE_RESPONSE_HEADERS = {
     "Cache-Control": "no-cache, no-transform",
     "X-Accel-Buffering": "no",
     "Connection": "keep-alive",
+    "Content-Type": "text/event-stream",
 }
 
 # ================================

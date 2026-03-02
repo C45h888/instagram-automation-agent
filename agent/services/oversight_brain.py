@@ -21,6 +21,7 @@ from cachetools import TTLCache
 from config import logger
 from services.supabase_service import SupabaseService, _cache_get, _cache_set
 from services.prompt_service import PromptService
+from metrics import SSE_DISCONNECTS, SSE_HEARTBEATS_SENT, SSE_ACTIVE_STREAMS
 
 
 # L1 in-memory cache (mirrors supabase_service.py pattern)
@@ -188,15 +189,42 @@ async def astream_chat(
     chat_history: Optional[list] = None,
     user_id: str = "dashboard-user",
     request_id: str = "unknown",
+    request=None,  # FastAPI Request for disconnect detection
 ):
-    """Streaming version of chat(). Yields SSE events.
+    """Streaming version of chat() with Phase 1 hardening.
 
-    Auto-injects recent audit_log decisions as context.
-    Streams tokens via SSE: data: {"token": "..."}\n\n
-    Final event: data: {"done": true, "latency_ms": ..., "request_id": ...}\n\n
+    Features:
+    - Event IDs for Last-Event-ID resume support
+    - Heartbeat pings every N seconds (prevents proxy timeouts)
+    - Disconnect detection (stops LLM on client disconnect)
+    - Tool status events (tool_call, tool_done)
+    - Proper SSE formatting (id:, event:, data: fields)
+
+    Args:
+        request: FastAPI Request object for disconnect detection
     """
     import json as json_mod
+    from config import OVERSIGHT_AUTO_CONTEXT_LIMIT, OVERSIGHT_LLM_TIMEOUT_SECONDS, SSE_HEARTBEAT_INTERVAL_SECONDS
+
     start = time.time()
+    event_id = 0
+    accumulated = ""
+
+    # Helper: format SSE event with id and event type
+    def format_sse_event(payload: dict, event_type: str = "message") -> str:
+        nonlocal event_id
+        event_id += 1
+        data = json_mod.dumps(payload)
+        return f"id: {event_id}\nevent: {event_type}\ndata: {data}\nretry: 3000\n\n"
+
+    # Helper: check if client disconnected
+    async def is_disconnected() -> bool:
+        if not request:
+            return False
+        try:
+            return await request.is_disconnected()
+        except Exception:
+            return False
 
     # Build conversation history text
     history_text = ""
@@ -207,7 +235,6 @@ async def astream_chat(
             history_text += f"{role}: {content}\n"
 
     # Auto-inject recent decisions as context
-    from config import OVERSIGHT_AUTO_CONTEXT_LIMIT, OVERSIGHT_LLM_TIMEOUT_SECONDS
     auto_context = await _fetch_auto_context(
         business_account_id,
         limit=OVERSIGHT_AUTO_CONTEXT_LIMIT,
@@ -218,22 +245,106 @@ async def astream_chat(
         chat_history=history_text or "(No prior conversation)",
     )
 
-    # Stream with timeout
-    accumulated = ""
+    # Event queue for concurrent heartbeat + LLM tokens
+    event_queue = asyncio.Queue()
+    heartbeat_task = None
+
+    async def heartbeat_loop():
+        """Send heartbeat pings every N seconds."""
+        while True:
+            try:
+                await asyncio.sleep(SSE_HEARTBEAT_INTERVAL_SECONDS)
+                if await is_disconnected():
+                    break
+                await event_queue.put(("heartbeat", None))
+                SSE_HEARTBEATS_SENT.labels(endpoint="oversight").inc()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"[{request_id}] Heartbeat error: {e}")
+                break
+
+    async def on_tool_event(event: dict):
+        """Callback from agent_service for tool events."""
+        await event_queue.put(("tool_event", event))
+
+    # Track active stream
+    SSE_ACTIVE_STREAMS.labels(endpoint="oversight").inc()
+
+    # Start heartbeat task
+    heartbeat_task = asyncio.create_task(heartbeat_loop())
+
     try:
+        # Stream LLM response with timeout
         agent = _get_agent()
         async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS):
-            async for chunk in agent.astream_analyze(prompt):
+            async for chunk in agent.astream_analyze(prompt, on_event=on_tool_event):
+                if await is_disconnected():
+                    logger.info(f"[{request_id}] Client disconnected during stream")
+                    SSE_DISCONNECTS.labels(endpoint="oversight").inc()
+                    break
                 accumulated += chunk
-                yield f"data: {json_mod.dumps({'token': chunk})}\n\n"
+                await event_queue.put(("token", chunk))
+
     except TimeoutError:
         logger.warning(f"[{request_id}] Oversight stream timed out after {OVERSIGHT_LLM_TIMEOUT_SECONDS}s")
-        yield f"data: {json_mod.dumps({'error': 'timeout'})}\n\n"
+        await event_queue.put(("error", {"error": "timeout"}))
 
+    except Exception as e:
+        logger.error(f"[{request_id}] Oversight stream error: {e}")
+        await event_queue.put(("error", {"error": "stream_failed", "message": str(e)}))
+
+    finally:
+        # Signal end of stream
+        await event_queue.put(("stream_done", None))
+        # Cancel heartbeat task
+        if heartbeat_task:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        # Decrement active streams counter
+        SSE_ACTIVE_STREAMS.labels(endpoint="oversight").dec()
+
+    # Emit all queued events as SSE
+    while True:
+        try:
+            event_type, event_data = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+
+            # Check disconnect before emitting each event
+            if await is_disconnected():
+                logger.info(f"[{request_id}] Client disconnected before event emission")
+                SSE_DISCONNECTS.labels(endpoint="oversight").inc()
+                break
+
+            if event_type == "heartbeat":
+                yield format_sse_event({"heartbeat": True}, event_type="ping")
+
+            elif event_type == "tool_event":
+                yield format_sse_event(event_data, event_type=event_data.get("event_type", "tool_status"))
+
+            elif event_type == "token":
+                yield format_sse_event({"token": event_data}, event_type="message")
+
+            elif event_type == "error":
+                yield format_sse_event(event_data, event_type="error")
+
+            elif event_type == "stream_done":
+                break
+
+        except asyncio.TimeoutError:
+            break
+        except Exception as e:
+            logger.error(f"[{request_id}] Event emission error: {e}")
+            break
+
+    # Final completion event
     latency_ms = int((time.time() - start) * 1000)
-
-    # Final event
-    yield f"data: {json_mod.dumps({'done': True, 'latency_ms': latency_ms, 'request_id': request_id})}\n\n"
+    yield format_sse_event(
+        {"done": True, "latency_ms": latency_ms},
+        event_type="done"
+    )
 
     # Audit log (fire-and-forget)
     SupabaseService.log_decision(
@@ -249,7 +360,8 @@ async def astream_chat(
             "latency_ms": latency_ms,
             "request_id": request_id,
             "streamed": True,
+            "events_sent": event_id,
         },
     )
 
-    logger.info(f"[{request_id}] Oversight Brain streamed in {latency_ms}ms")
+    logger.info(f"[{request_id}] Oversight Brain streamed in {latency_ms}ms ({event_id} events)")
