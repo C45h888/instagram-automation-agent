@@ -9,10 +9,18 @@ services:
     image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
+    # Wait for Ollama to be ready, then pull the model (if not already cached).
+    # startup.sh uses `ollama pull` which is available inside this container.
+    command: >
+      sh -c "ollama serve &
+             until curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; do sleep 3; done &&
+             bash /startup.sh;
+             wait"
     ports:
       - "11434:11434"
     volumes:
       - ollama-data:/root/.ollama
+      - ./agent/startup.sh:/startup.sh:ro
     networks:
       - instagram-network
     healthcheck:
@@ -106,7 +114,8 @@ services:
     ports:
       - "3002:3002"
     env_file:
-      - .env
+      - path: .env
+        required: false          # optional so a VPS with only .env.production doesn't error
       - .env.production
     environment:
       - OLLAMA_HOST=http://ollama:11434           # Docker-internal: agent → ollama

@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import logging
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -22,29 +23,48 @@ logger = logging.getLogger("oversight-agent")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    logger.error("FATAL: SUPABASE_URL and SUPABASE_KEY environment variables are required")
-    sys.exit(1)
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+_SUPABASE_DEGRADED = not SUPABASE_URL or not SUPABASE_KEY
+if _SUPABASE_DEGRADED:
+    logger.warning(
+        "SUPABASE_URL/SUPABASE_KEY not set — starting in degraded mode. "
+        "All DB calls will fail until env vars are present and the container is restarted."
+    )
+    supabase: Client | None = None
+else:
+    supabase: Client | None = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
 def verify_supabase_connection():
-    """Test Supabase connectivity on startup. Crashes if unreachable."""
-    try:
-        supabase.table("audit_log").select("id").limit(1).execute()
-        logger.info("Supabase connection verified successfully")
-    except Exception as e:
-        logger.error(f"FATAL: Supabase connection failed: {e}")
-        sys.exit(1)
+    """Test Supabase connectivity on startup. Retries 3x with backoff; logs error on failure (no crash)."""
+    if _SUPABASE_DEGRADED or supabase is None:
+        logger.warning("verify_supabase_connection: skipped — running in degraded mode (no credentials)")
+        return
+    for attempt in range(1, 4):
+        try:
+            supabase.table("audit_log").select("id").limit(1).execute()
+            logger.info("Supabase connection verified successfully")
+            return
+        except Exception as e:
+            wait = 2 ** attempt  # 2s, 4s, 8s
+            if attempt < 3:
+                logger.warning(f"Supabase connectivity check failed (attempt {attempt}/3) — retrying in {wait}s: {e}")
+                time.sleep(wait)
+            else:
+                logger.error(
+                    f"Supabase unreachable after 3 attempts: {e}. "
+                    "Agent will start in degraded mode — DB calls may fail until Supabase is reachable."
+                )
 
 
 def validate_schema():
     """Verify DB schema matches code expectations at startup.
 
-    Prevents silent mismatches — if a column was renamed or table dropped,
-    the agent crashes immediately instead of returning wrong data.
+    Retries each required table 3x with backoff. Logs errors but does not crash —
+    a transient network blip on VPS boot shouldn't kill the container.
     """
+    if _SUPABASE_DEGRADED or supabase is None:
+        logger.warning("validate_schema: skipped — running in degraded mode (no credentials)")
+        return
     required = {
         "instagram_media": ["caption", "like_count", "comments_count", "reach", "published_at"],
         "instagram_business_accounts": ["username", "name", "account_type", "followers_count"],
@@ -59,12 +79,21 @@ def validate_schema():
         "audit_log": ["event_type", "action", "details", "resource_type"],
     }
     for table, columns in required.items():
-        try:
-            supabase.table(table).select(",".join(columns)).limit(0).execute()
-            logger.info(f"Schema OK: {table}")
-        except Exception as e:
-            logger.error(f"SCHEMA MISMATCH: {table} — {e}")
-            sys.exit(1)
+        for attempt in range(1, 4):
+            try:
+                supabase.table(table).select(",".join(columns)).limit(0).execute()
+                logger.info(f"Schema OK: {table}")
+                break
+            except Exception as e:
+                wait = 2 ** attempt  # 2s, 4s, 8s
+                if attempt < 3:
+                    logger.warning(f"Schema check failed for '{table}' (attempt {attempt}/3) — retrying in {wait}s: {e}")
+                    time.sleep(wait)
+                else:
+                    logger.error(
+                        f"SCHEMA MISMATCH or DB unreachable: '{table}' — {e}. "
+                        "Agent continuing — this may indicate a missing column or table."
+                    )
 
     logger.info("All required schema validations passed")
 
