@@ -108,7 +108,7 @@ services:
   langchain-agent:
     container_name: langchain-agent
     build:
-      context: ./agent
+      context: .
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
