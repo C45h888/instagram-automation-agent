@@ -80,7 +80,7 @@ SUPABASE_KEY=your-service-role-key-here
 
 # Ollama Configuration
 OLLAMA_HOST=http://ollama:11434
-OLLAMA_MODEL=nemotron:8b-q5_K_M
+OLLAMA_MODEL=nemotron:8b-q4_K_M
 
 # Security
 AGENT_API_KEY=your-secret-api-key-here  # Generate with: openssl rand -hex 32

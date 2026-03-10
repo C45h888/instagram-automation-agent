@@ -131,7 +131,7 @@ def validate_schema():
 # Ollama / Nemotron LLM
 # ================================
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "hf.co/MaziyarPanahi/Nemotron-Orchestrator-8B-GGUF:Q5_K_M")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "hf.co/MaziyarPanahi/Nemotron-Orchestrator-8B-GGUF:Q4_K_M")
 
 llm = ChatOllama(
     model=OLLAMA_MODEL,
