@@ -17,7 +17,7 @@ services:
              bash /startup.sh;
              wait"
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama-data:/root/.ollama
       - ./agent/startup.sh:/startup.sh:ro
@@ -46,7 +46,7 @@ services:
     container_name: agent-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     networks:
@@ -67,16 +67,16 @@ services:
           memory: 64M
 
   # ================================
-  # Backend API (Express — built from GitHub)
+  # Backend API (Express — built from local)
   # ================================
   backend:
     container_name: instagram-backend
     build:
-      context: https://github.com/C45h888/instagram-automation-dashboard.git#main:backend.api
+      context: ../instagram-automation-dashboard/backend.api
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
     env_file:
       - .env
     environment:
@@ -112,7 +112,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "3002:3002"
+      - "127.0.0.1:3002:3002"
     env_file:
       - path: .env
         required: false          # optional so a VPS with only .env.production doesn't error
@@ -147,7 +147,7 @@ services:
           memory: 1G
 
   # ================================
-  # Frontend (Nginx + React — built from GitHub)
+  # Frontend (Nginx + React — built from local)
   # port 8080 on host → 80 inside nginx.
   # On Linux, binding host port 80 directly requires sudo;
   # 8080 avoids privilege escalation.
@@ -155,7 +155,7 @@ services:
   frontend:
     container_name: instagram-frontend
     build:
-      context: https://github.com/C45h888/instagram-automation-dashboard.git#main
+      context: ../instagram-automation-dashboard
       dockerfile: Dockerfile
       args:
         VITE_AUTH_MODE: ${VITE_AUTH_MODE}
@@ -168,6 +168,7 @@ services:
         VITE_WEBHOOK_URL: ${VITE_WEBHOOK_URL}
         VITE_WEBHOOK_VERIFY_TOKEN: ${VITE_WEBHOOK_VERIFY_TOKEN}
         VITE_SHOW_ADMIN_LINK: ${VITE_SHOW_ADMIN_LINK}
+        VITE_AGENT_URL: ${VITE_AGENT_URL}
         N8N_BASE_URL: ${N8N_BASE_URL}
         N8N_DM_WEBHOOK: ${N8N_DM_WEBHOOK}
         N8N_COMMENT_WEBHOOK: ${N8N_COMMENT_WEBHOOK}
@@ -181,7 +182,7 @@ services:
       - .env
     restart: unless-stopped
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     depends_on:
       backend:
         condition: service_healthy
