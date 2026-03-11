@@ -14,7 +14,7 @@ services:
     entrypoint: /bin/sh
     command: >
       -c "ollama serve &
-          until curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; do sleep 3; done &&
+          until ollama list > /dev/null 2>&1; do sleep 3; done &&
           bash /startup.sh;
           wait"
     ports:
@@ -25,7 +25,7 @@ services:
     networks:
       - instagram-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 5
