@@ -9,13 +9,14 @@ services:
     image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
-    # Wait for Ollama to be ready, then pull the model (if not already cached).
-    # startup.sh uses `ollama pull` which is available inside this container.
+    # entrypoint overrides the image's /bin/ollama ENTRYPOINT so the command
+    # runs as a plain shell invocation, not `ollama sh -c ...` (which fails).
+    entrypoint: /bin/sh
     command: >
-      sh -c "ollama serve &
-             until curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; do sleep 3; done &&
-             bash /startup.sh;
-             wait"
+      -c "ollama serve &
+          until curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; do sleep 3; done &&
+          bash /startup.sh;
+          wait"
     ports:
       - "127.0.0.1:11434:11434"
     volumes:
