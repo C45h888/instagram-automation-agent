@@ -21,6 +21,8 @@ from config import (
     logger,
     ENGAGEMENT_MONITOR_ENABLED,
     ENGAGEMENT_MONITOR_INTERVAL_MINUTES,
+    DM_MONITOR_ENABLED,
+    DM_MONITOR_INTERVAL_MINUTES,
     CONTENT_SCHEDULER_ENABLED,
     CONTENT_SCHEDULER_TIMES,
     SALES_ATTRIBUTION_ENABLED,
@@ -38,6 +40,7 @@ from config import (
     HEARTBEAT_INTERVAL_MINUTES,
 )
 from scheduler.engagement_monitor import engagement_monitor_run
+from scheduler.dm_monitor import dm_monitor_run
 from scheduler.content_scheduler import content_scheduler_run
 from scheduler.weekly_attribution_learning import weekly_attribution_learning_run
 from scheduler.ugc_discovery import ugc_discovery_run
@@ -65,6 +68,20 @@ class SchedulerService:
                 "misfire_grace_time": 60,  # Skip if >60s late
             }
         )
+
+        # --- DM Monitor (interval-based, webhook fallback) ---
+        if DM_MONITOR_ENABLED:
+            cls._scheduler.add_job(
+                cls._make_tracked_runner("dm_monitor", dm_monitor_run),
+                "interval",
+                minutes=DM_MONITOR_INTERVAL_MINUTES,
+                id="dm_monitor",
+                name="DM Monitor",
+            )
+            cls._job_stats["dm_monitor"] = {"last_run_time": None, "total_runs": 0}
+            logger.info(f"DM Monitor scheduled (every {DM_MONITOR_INTERVAL_MINUTES} min)")
+        else:
+            logger.info("DM Monitor disabled (DM_MONITOR_ENABLED=false)")
 
         # --- Engagement Monitor (interval-based) ---
         if ENGAGEMENT_MONITOR_ENABLED:
@@ -225,6 +242,13 @@ class SchedulerService:
 
         result = {"running": cls._scheduler.running}
 
+        # DM monitor
+        result["dm_monitor"] = cls._get_job_status(
+            "dm_monitor",
+            DM_MONITOR_ENABLED,
+            {"interval_minutes": DM_MONITOR_INTERVAL_MINUTES},
+        )
+
         # Engagement monitor
         result["engagement_monitor"] = cls._get_job_status(
             "engagement_monitor",
@@ -350,6 +374,7 @@ class SchedulerService:
         Runs immediately in the current context.
         """
         runners = {
+            "dm_monitor": dm_monitor_run,
             "engagement_monitor": engagement_monitor_run,
             "content_scheduler": content_scheduler_run,
             "weekly_learning": weekly_attribution_learning_run,

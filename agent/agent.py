@@ -43,7 +43,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 
-from config import logger, OLLAMA_HOST, OLLAMA_MODEL, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, OUTBOUND_QUEUE_ENABLED, OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES, HEARTBEAT_ENABLED, HEARTBEAT_INTERVAL_MINUTES, HEARTBEAT_AGENT_ID, limiter, CORS_ALLOW_ORIGINS, verify_supabase_connection, validate_schema
+from config import logger, OLLAMA_HOST, OLLAMA_MODEL, DM_MONITOR_ENABLED, DM_MONITOR_INTERVAL_MINUTES, ENGAGEMENT_MONITOR_ENABLED, CONTENT_SCHEDULER_ENABLED, SALES_ATTRIBUTION_ENABLED, WEEKLY_LEARNING_ENABLED, UGC_COLLECTION_ENABLED, ANALYTICS_REPORTS_ENABLED, OUTBOUND_QUEUE_ENABLED, OUTBOUND_QUEUE_STARTUP_RECOVERY_AGE_MINUTES, HEARTBEAT_ENABLED, HEARTBEAT_INTERVAL_MINUTES, HEARTBEAT_AGENT_ID, limiter, CORS_ALLOW_ORIGINS, verify_supabase_connection, validate_schema
 from middleware import api_key_middleware
 from services.prompt_service import PromptService
 from scheduler.scheduler_service import SchedulerService
@@ -148,6 +148,7 @@ async def lifespan(app: FastAPI):
         worker.start()
         asyncio.create_task(_recover_stuck_publishing_posts())
     logger.info(f"  Outbound Queue Worker: {'enabled' if OUTBOUND_QUEUE_ENABLED else 'disabled'}")
+    logger.info(f"  DM Monitor: {'enabled' if DM_MONITOR_ENABLED else 'disabled'} (webhook fallback, every {DM_MONITOR_INTERVAL_MINUTES} min)")
     logger.info(f"  Engagement Monitor: {'enabled' if ENGAGEMENT_MONITOR_ENABLED else 'disabled'}")
     logger.info(f"  Content Scheduler: {'enabled' if CONTENT_SCHEDULER_ENABLED else 'disabled'}")
     logger.info(f"  Sales Attribution: {'enabled' if SALES_ATTRIBUTION_ENABLED else 'disabled'}")

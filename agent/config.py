@@ -268,6 +268,17 @@ ENGAGEMENT_MONITOR_AUTO_REPLY_ENABLED = os.getenv("ENGAGEMENT_MONITOR_AUTO_REPLY
 ENGAGEMENT_MONITOR_CONFIDENCE_THRESHOLD = float(os.getenv("ENGAGEMENT_MONITOR_CONFIDENCE_THRESHOLD", "0.75"))
 
 # ================================
+# DM Monitor (Scheduler — webhook fallback)
+# ================================
+DM_MONITOR_ENABLED = os.getenv("DM_MONITOR_ENABLED", "true").lower() == "true"
+DM_MONITOR_INTERVAL_MINUTES = int(os.getenv("DM_MONITOR_INTERVAL_MINUTES", "5"))
+DM_MONITOR_MAX_MESSAGES_PER_RUN = int(os.getenv("DM_MONITOR_MAX_MESSAGES_PER_RUN", "20"))
+DM_MONITOR_MAX_CONCURRENT_ANALYSES = int(os.getenv("DM_MONITOR_MAX_CONCURRENT_ANALYSES", "3"))
+DM_MONITOR_HOURS_BACK = int(os.getenv("DM_MONITOR_HOURS_BACK", "24"))
+DM_MONITOR_AUTO_REPLY_ENABLED = os.getenv("DM_MONITOR_AUTO_REPLY_ENABLED", "true").lower() == "true"
+DM_MONITOR_CONFIDENCE_THRESHOLD = float(os.getenv("DM_MONITOR_CONFIDENCE_THRESHOLD", "0.75"))
+
+# ================================
 # Content Scheduler
 # ================================
 CONTENT_SCHEDULER_ENABLED = os.getenv("CONTENT_SCHEDULER_ENABLED", "true").lower() == "true"

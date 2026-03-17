@@ -593,6 +593,107 @@ class SupabaseService:
             return False
 
     # --------------------------------------------------
+    # READ: Unprocessed Inbound DMs (DM Monitor fallback)
+    # --------------------------------------------------
+    @staticmethod
+    def get_unprocessed_dms(business_account_id: str, limit: int = 20, hours_back: int = 24) -> list:
+        """Fetch inbound DMs not yet processed, enriched with conversation metadata.
+
+        Filters:
+          - is_from_business = false   (customer messages only)
+          - processed_by_automation = false
+          - sent_at > now - hours_back (acts as 24h window proxy — avoids stale within_window)
+
+        Two-step: messages → batch-fetch conversation rows → enrich with customer info.
+        Returns oldest-first (FIFO).
+        """
+        if not supabase or not business_account_id:
+            return []
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours_back)).isoformat()
+
+        try:
+            msg_result = _execute_query(
+                supabase.table("instagram_dm_messages")
+                .select("id, instagram_message_id, message_text, sent_at, conversation_id, business_account_id")
+                .eq("business_account_id", business_account_id)
+                .eq("is_from_business", False)
+                .eq("processed_by_automation", False)
+                .gte("sent_at", cutoff)
+                .order("sent_at", desc=False)
+                .limit(limit),
+                table="instagram_dm_messages",
+                operation="select"
+            )
+            messages = msg_result.data or []
+            if not messages:
+                return []
+
+            # Batch-fetch conversation rows to enrich with customer info
+            conv_ids = list({m["conversation_id"] for m in messages if m.get("conversation_id")})
+            conv_map = {}
+            if conv_ids:
+                conv_result = _execute_query(
+                    supabase.table("instagram_dm_conversations")
+                    .select("id, customer_username, customer_instagram_id, instagram_thread_id")
+                    .in_("id", conv_ids),
+                    table="instagram_dm_conversations",
+                    operation="select"
+                )
+                conv_map = {c["id"]: c for c in (conv_result.data or [])}
+
+            for msg in messages:
+                conv = conv_map.get(msg.get("conversation_id"), {})
+                msg["customer_username"] = conv.get("customer_username", "")
+                msg["customer_instagram_id"] = conv.get("customer_instagram_id", "")
+                msg["instagram_thread_id"] = conv.get("instagram_thread_id", "")
+
+            return messages
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping unprocessed DMs fetch")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to fetch unprocessed DMs for {business_account_id}: {e}")
+            return []
+
+    # --------------------------------------------------
+    # WRITE: Mark DM Processed (DM Monitor fallback)
+    # --------------------------------------------------
+    @staticmethod
+    def mark_dm_processed(
+        message_id: str,
+        response_text: str = None,
+        was_replied: bool = False,
+    ) -> bool:
+        """Update instagram_dm_messages to mark as processed by automation."""
+        if not supabase or not message_id:
+            return False
+
+        update_data = {"processed_by_automation": True}
+        if was_replied and response_text:
+            update_data["automated_response_sent"] = True
+            update_data["response_text"] = response_text
+            update_data["response_sent_at"] = datetime.now(timezone.utc).isoformat()
+
+        try:
+            _execute_query(
+                supabase.table("instagram_dm_messages")
+                .update(update_data)
+                .eq("id", message_id),
+                table="instagram_dm_messages",
+                operation="update"
+            )
+            return True
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to mark DM processed")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to mark DM {message_id} as processed: {e}")
+            return False
+
+    # --------------------------------------------------
     # READ: Post Context by UUID (Engagement Monitor)
     # --------------------------------------------------
     @staticmethod

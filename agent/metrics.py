@@ -118,6 +118,27 @@ ENGAGEMENT_MONITOR_DURATION = Histogram(
 )
 
 # ================================
+# DM Monitor
+# ================================
+DM_MONITOR_RUNS = Counter(
+    "agent_dm_monitor_runs_total",
+    "DM monitor cycles completed",
+    ["status"],
+)
+
+DM_MONITOR_MESSAGES = Counter(
+    "agent_dm_monitor_messages_total",
+    "Inbound DMs processed by DM monitor",
+    ["action"],
+)
+
+DM_MONITOR_DURATION = Histogram(
+    "agent_dm_monitor_duration_seconds",
+    "Duration of DM monitor cycle",
+    buckets=[5.0, 15.0, 30.0, 60.0, 120.0, 300.0],
+)
+
+# ================================
 # Content Scheduler
 # ================================
 CONTENT_SCHEDULER_RUNS = Counter(
