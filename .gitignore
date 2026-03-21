@@ -13,8 +13,9 @@ __pycache__/
 *.pyo
 .pytest_cache/
 
-# ─── Docker build artefacts (agent-only dev file) ──────────
+# ─── Docker build artefacts (local dev files) ──────────
 agent/docker-compose.agent-only.yml
+docker-compose.local.yml
 
 # ─── OS / Editor ────────────────────────────────────────────
 .DS_Store

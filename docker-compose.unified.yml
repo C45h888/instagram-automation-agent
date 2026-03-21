@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
 
   # ================================
@@ -117,7 +115,8 @@ services:
     env_file:
       - path: .env
         required: false          # optional so a VPS with only .env.production doesn't error
-      - .env.production
+      - path: .env.production
+        required: false          # optional so local dev without .env.production doesn't error
     environment:
       - OLLAMA_HOST=http://ollama:11434           # Docker-internal: agent → ollama
       - REDIS_HOST=redis                          # Docker-internal: agent → redis

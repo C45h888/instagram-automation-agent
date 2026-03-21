@@ -19,7 +19,7 @@ class AuditLogQueryInput(BaseModel):
     resource_id: Optional[str] = Field(None, description="Filter by resource UUID (comment_id, post_id, etc.)")
     event_type: Optional[str] = Field(None, description="Filter by event type (e.g. 'webhook_comment_processed')")
     date_from: Optional[str] = Field(None, description="ISO date string e.g. '2026-02-01'")
-    business_account_id: Optional[str] = Field(None, description="Filter by business account UUID (matches user_id in audit_log)")
+    business_account_id: Optional[str] = Field(None, description="Filter by business account UUID (matches details->business_account_id in audit_log)")
     limit: int = Field(default=10, ge=1, le=50, description="Max results to return")
 
 
@@ -57,7 +57,9 @@ def _get_audit_log_entries(
     if date_from:
         query = query.gte("created_at", date_from)
     if business_account_id:
-        query = query.eq("user_id", business_account_id)
+        # Filter by business_account_id stored in details JSON, NOT user_id column
+        # user_id is the actor (system/user UUID), business_account_id is in details
+        query = query.filter("details->>business_account_id", "eq", business_account_id)
 
     result = _execute_query(
         query.order("created_at", desc=True).limit(limit),
