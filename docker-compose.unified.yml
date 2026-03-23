@@ -122,6 +122,7 @@ services:
       - REDIS_HOST=redis                          # Docker-internal: agent → redis
       - REDIS_PORT=6379
       - BACKEND_API_URL=https://api.888intelligenceautomation.in  # via nginx reverse proxy
+      - OVERSIGHT_LLM_TIMEOUT_SECONDS=60          # Ollama on 8 vCPU needs 20-30s; 60s gives headroom
     depends_on:
       ollama:
         condition: service_healthy

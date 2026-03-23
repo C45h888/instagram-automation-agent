@@ -21,3 +21,7 @@ docker-compose.local.yml
 .DS_Store
 .idea/
 .vscode/
+.claude/errors.md
+.claude/context-dump.md
+.claude/errors.md
+.claude/context-dump.md

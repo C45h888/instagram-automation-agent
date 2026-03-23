@@ -1,177 +1,87 @@
-Updated Context Dump for LangChain Agent Development
-Version: 2.0 (February 2026)
-Scope: This document is the single source of truth for the LangChain agent only. It reflects the current unified architecture: no N8N in production. All automation logic (reply to comment/DM, post scheduling, engagement monitoring) has been migrated into LangChain tools inside the agent. The agent is now the sole execution layer.
-Core Principles
-
-Agent Role: The agent is the central brain — it fetches context from Supabase, analyzes data, makes decisions, executes actions (via tools), and logs everything.
-DB as Source of Truth: All reads/writes go through Supabase (instagram_media, instagram_business_accounts, audit_log, etc.).
-Model: Nemotron-Orchestrator-8B Q5_K_M (optimized for tool calling, agentic workflows, reasoning, and structured outputs).
-Hosting: Hetzner CX33 (4 vCPU, 8 GB RAM) – Dockerized, private, cost-effective.
-Subdomains: app.888intelligenceautomation.in (frontend), api.888intelligenceautomation.in (backend), agent.888intelligenceautomation.in (LangChain agent).
-No N8N in Production: N8N is kept locally only for prototyping. All execution is now inside the agent.
-Scalability: Async Python, caching, concurrency control (semaphore), RAM target <7 GB total.
-
-Current Architecture (No N8N)
-text┌─────────────────────────────┐
-│   User / Client Browser     │
-│   (app.888intelligenceautomation.in) │
-└─────────────────────────────┘
-              │ HTTPS
-              ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Hetzner CX33 VPS - Docker Compose (3 Services)             │
-│                                                             │
-│  ┌──────────────────────┐  ┌──────────────────────┐        │
-│  │ Frontend (React)     │  │ Backend (Node/Express)│        │
-│  │ - UI/Dashboard       │  │ - API Endpoints       │        │
-│  │ - Real-time Updates  │  │ - Token Management    │        │
-│  │ - Analytics Display  │  │ - Data Sync           │        │
-│  └──────────────────────┘  └──────────────────────┘        │
-│                   │                 │                       │
-│                   ▼                 ▼                       │
-│              Common Supabase DB - Source of Truth          │
-│              - instagram_media (posts/comments)            │
-│              - instagram_business_accounts (IDs)           │
-│              - api_usage (metrics)                         │
-│              - audit_log (agent decisions/history)         │
-│                   │                 │                       │
-│                   ▼                 ▼                       │
-│  ┌──────────────────────┐                                   │
-│  │ LangChain Agent      │                                   │
-│  │ agent.domain.in      │                                   │
-│  │ - Nemotron-8B        │                                   │
-│  │ - Supabase Tools     │                                   │
-│  │ - Analysis + Decision│                                   │
-│  │ - Direct Execution   │                                   │
-│  │ - Logging            │                                   │
-│  └──────────────────────┘                                   │
-│                   │                                         │
-│                   └─────────────→ Direct Actions           │
-│                          (Instagram API calls via backend) │
-└─────────────────────────────────────────────────────────────┘
-Data Flow (Unified, No N8N):
-
-Event (new comment, DM, low engagement) → Backend → Store in Supabase.
-Backend/Edge Function → POST to agent /analyze-comment (or similar).
-Agent → Queries Supabase tools for context.
-Agent → Nemotron-Orchestrator analyzes (sentiment, brand alignment, risk).
-Agent → Decides action (reply, ignore, delete, repost).
-Agent → Executes directly (calls backend proxy for Instagram API).
-Agent → Logs outcome to audit_log.
-Frontend polls Supabase for real-time updates.
-
-Key Components (Agent-Focused)
-1. Supabase Tools (agent/tools/supabase_tools.py)
-
-get_post_context(post_id)
-get_account_context(business_account_id)
-log_decision(event, user_id, data)
-Async + caching (TTL) + retry (tenacity)
-Pydantic validation
-
-2. Agent Service (agent/services/agent_service.py)
-
-Uses create_structured_chat_agent with tools
-Handles tool calls, parsing, error propagation
-Async support for non-blocking DB/LLM calls
-
-3. Prompts (prompts/ folder)
-
-Tool-aware, with few-shot examples
-DB-backed (prompt_templates table) for versioning/A/B testing
-System prompt defines role: "You are the Instagram oversight agent"
-
-4. Routes (approve_comment.py, approve_dm.py, approve_post.py)
-
-Use approve_base.py shared pipeline
-Hard rules stay in routes (deterministic)
-Agent handles context fetching + decision + execution + logging
-
-5. Observability
-
-Prometheus /metrics endpoint
-Request ID tracing
-Audit logging to Supabase
-
-6. Deployment
-
-Docker Compose (frontend, backend, agent + Ollama)
-No N8N in production
-RAM target: <7 GB total on CX33
-
-
-
-
-Final Architecture Context Dump (Single Source of Truth)
-Core Principle
-
-Agent never holds IG tokens
-Backend is the only place that holds IG tokens and makes Graph API calls
-Frontend never depends on agent for live IG events
-Agent receives only a subset of IG webhooks directly (comments, mentions, story mentions)
-All other data comes via Supabase (read) or backend proxy (on-demand)
-
-Data Flow Diagram
-textMeta Instagram Graph API
-        │
-        │ Webhooks (ALL events: comments, mentions, story mentions, DMs, tags, etc.)
-        ▼
-Backend (port 3000/3001)
-   ├── Verify HMAC signature
-   ├── Store raw event in Supabase
-   ├── Broadcast to frontend via /realtime-updates cache
-   └── (Optional: forward specific events to agent via REST if needed in future)
-
-Frontend (Dashboard)
-   ├── Reads Supabase for all historical / processed data
-   └── Polls /realtime-updates for live IG events (unchanged)
-
-Agent (port 3002)
-   ├── Receives direct IG webhooks ONLY for:
-   │     - Comments
-   │     - Mentions (captions/comments)
-   │     - Story mentions
-   ├── Reads Supabase directly for all other data (UGC, attributions, reports, audit_log, etc.)
-   └── Calls backend proxy REST endpoints for data it cannot get otherwise:
-         - search-hashtag
-         - tags
-         - send-dm
-         - publish-post
-         - insights
-         - (any other Graph API data that requires token)
-
-Execution Flow (Agent wants to act):
-Agent → POST /api/instagram/send-dm (or publish-post, search-hashtag, etc.)
-   ↓
-Backend:
-   - Validate X-API-Key
-   - Lookup long-lived token
-   - Call Graph API
-   - logApiCall(...)
-   - Return clean JSON only
-   ↓
-Agent:
-   - Process response
-   - Write outcome to Supabase
-   - log_decision(...)
-Locked Rules
-
-Agent direct webhooks → only comments, mentions, story mentions
-All other IG data → backend proxy or Supabase read
-Frontend live events → backend /realtime-updates (unchanged)
-Backend role → execution + proxy + webhook receiver + logging
-Agent role → automation + decision making + summaries + Oversight Brain
-
-What This Means for the Plan
-The previous plan had one flaw: it assumed the agent would receive all IG webhooks directly.
-That is now corrected.
-The backend proxy endpoints we planned are still exactly correct:
-
-search-hashtag
-tags
-send-dm
-publish-post
-insights
-
-These are the calls the agent must make to the backend because it cannot get that data via webhook or Supabase.
-
+SUPABASE_URL=https://uromexjprcrjfmhkmgxa.supabase.co
+SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVyb21leGpwcmNyamZtaGttZ3hhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTc1ODE5NSwiZXhwIjoyMDcxMzM0MTk1fQ.M_XwXITf1cYqT1-exKCpVzQTeY3gJb5qSprG1H-mWnM
+SUPABASE_SERVICE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVyb21leGpwcmNyamZtaGttZ3hhIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTc1ODE5NSwiZXhwIjoyMDcxMzM0MTk1fQ.M_XwXITf1cYqT1-exKCpVzQTeY3gJb5qSprG1H-mWnM
+SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVyb21leGpwcmNyamZtaGttZ3hhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTU3NTgxOTUsImV4cCI6MjA3MTMzNDE5NX0.4iMC2ktj2nDlOYy-4NfNVHnV4i-tfCVFvgqR835cAOI
+OLLAMA_HOST=http://ollama:11434
+OLLAMA_MODEL=hf.co/MaziyarPanahi/Nemotron-Orchestrator-8B-GGUF:Q4_K_M
+AGENT_API_KEY=dqoSRrL3FJkXoUnI8B1HQ1Zpc2pEO3EsoMveDm0XB80
+FLASK_PORT=3002
+MAX_CONCURRENT_LLM=4
+INSTAGRAM_APP_ID=1595100661870639
+INSTAGRAM_APP_SECRET=16c39820a855b2056b5ddc6c12d18b61
+INSTAGRAM_CLIENT_ID=1595100661870639
+INSTAGRAM_CLIENT_SECRET=16c39820a855b2056b5ddc6c12d18b61
+INSTAGRAM_VERIFY_TOKEN=instagram_automation_cf_token_2024
+META_APP_ID=1449604936071207
+META_APP_SECRET=c9107cf010ca5bcf82236c71455fdc21
+FACEBOOK_APP_ID=1595100661870639
+FACEBOOK_APP_SECRET=16c39820a855b2056b5ddc6c12d18b61
+CORS_ALLOW_ORIGINS=https://app.888intelligenceautomation.in,https://api.888intelligenceautomation.in,https://agent.888intelligenceautomation.in
+ALLOWED_ORIGIN_1=https://app.888intelligenceautomation.in
+ALLOWED_ORIGIN_2=https://api.888intelligenceautomation.in
+ALLOWED_ORIGIN_3=https://agent.888intelligenceautomation.in
+AGENT_URL=http://langchain-agent:3002
+BACKEND_API_URL=https://api.888intelligenceautomation.in
+FRONTEND_URL=https://app.888intelligenceautomation.in
+OAUTH_REDIRECT_URI=https://app.888intelligenceautomation.in/auth/callback
+INSTAGRAM_REDIRECT_URI=https://api.888intelligenceautomation.in/auth/instagram/callback
+BACKEND_STATIC_IP=162.55.57.52
+ENCRYPTION_KEY=c38f5ccb05b576a28bbf69e4619007fc0e54df93948ad3b14f047256fa2cbd06
+ORDER_WEBHOOK_SECRET=769660f6be0743e6d2e9a36d22a1dec0320f66b24c99b5e89c00406f027f529d
+JWT_SECRET=cF+FAdbiB3kE1SsFqtiCLWsL13hGiurxRd6Sz6tlDv9qRYphYIps7syKgnLTgHNVb3v7/NBWY9R7WrMksqyJTw==
+JWT_EXPIRES_IN=15m
+JWT_REFRESH_EXPIRES_IN=7d
+NODE_ENV=production
+PORT=3001
+USE_FIXIE_PROXY=false
+PROACTIVE_SYNC_ENABLED=true
+PROACTIVE_COMMENTS_CRON=*/3 * * * *
+PROACTIVE_UGC_CRON=0 */3 * * *
+PROACTIVE_INSIGHTS_CRON=0 2 * * *
+POST_FALLBACK_ENABLED=true
+POST_FALLBACK_CRON=*/5 * * * *
+HEARTBEAT_STALE_MINUTES=30
+HEARTBEAT_ENABLED=true
+HEARTBEAT_INTERVAL_MINUTES=20
+HEARTBEAT_AGENT_ID=08408f8d-68ae-40b8-a32a-607c0a03dea0
+AGENT_USER_ID=agent-service
+ENGAGEMENT_MONITOR_ENABLED=true
+ENGAGEMENT_MONITOR_INTERVAL_MINUTES=5
+ENGAGEMENT_MONITOR_MAX_COMMENTS_PER_RUN=50
+ENGAGEMENT_MONITOR_AUTO_REPLY_ENABLED=true
+ENGAGEMENT_MONITOR_CONFIDENCE_THRESHOLD=0.75
+ENGAGEMENT_MONITOR_HOURS_BACK=24
+CONTENT_SCHEDULER_ENABLED=true
+AUTO_PUBLISH=false
+POST_APPROVAL_THRESHOLD=0.6
+SALES_ATTRIBUTION_ENABLED=true
+WEEKLY_LEARNING_ENABLED=true
+UGC_COLLECTION_ENABLED=true
+UGC_COLLECTION_AUTO_SEND_DM=false
+UGC_COLLECTION_AUTO_REPOST=false
+ANALYTICS_REPORTS_ENABLED=true
+ANALYTICS_LLM_INSIGHTS_ENABLED=false
+OVERSIGHT_STREAM_ENABLED=true
+OVERSIGHT_AUTO_CONTEXT_LIMIT=12
+OVERSIGHT_LLM_TIMEOUT_SECONDS=15
+OUTBOUND_QUEUE_ENABLED=true
+ADMIN_EMAIL=admin@888intelligence.com
+ADMIN_PASSWORD=ProductionSecurePassword2024!
+CRON_API_KEY=ba17d8308e488294d952b6435d0c5c4b87538433efc0e37b2828d9cb1f91cc59
+ADMIN_API_KEY=a80fdd1a6705d668b6a394fd0582430acce99089ffb89e8cb0de0dd571264d8b
+VITE_AUTH_MODE=both
+VITE_META_APP_ID=1449604936071207
+VITE_META_APP_SECRET=c9107cf010ca5bcf82236c71455fdc21
+VITE_OAUTH_REDIRECT_URI=https://app.888intelligenceautomation.in/auth/callback
+VITE_SUPABASE_URL=https://uromexjprcrjfmhkmgxa.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVyb21leGpwcmNyamZtaGttZ3hhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTU3NTgxOTUsImV4cCI6MjA3MTMzNDE5NX0.4iMC2ktj2nDlOYy-4NfNVHnV4i-tfCVFvgqR835cAOI
+VITE_API_BASE_URL=https://api.888intelligenceautomation.in
+VITE_API_URL=https://api.888intelligenceautomation.in
+VITE_AGENT_URL=https://agent.888intelligenceautomation.in
+VITE_WEBHOOK_URL=https://api.888intelligenceautomation.in
+VITE_WEBHOOK_VERIFY_TOKEN=instagram_automation_cf_token_2024
+VITE_SHOW_ADMIN_LINK=true
+DELETION_MAX_RETRIES=3
+DELETION_RETRY_BASE_MINUTES=5
+DELETION_ENABLE_AUTO_RETRY=false
+AGENT_UUID=fa2f7336-e336-48ee-a8e4-54ddaea86e09

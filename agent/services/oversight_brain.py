@@ -200,6 +200,12 @@ async def astream_chat(
     - Tool status events (tool_call, tool_done)
     - Proper SSE formatting (id:, event:, data: fields)
 
+    Architecture: both the LLM call and the heartbeat loop run as background
+    asyncio.Tasks that post events into a shared queue. The generator's main
+    body is purely a consumer — it blocks on queue.get() and yields whatever
+    arrives first (heartbeat ping or LLM token). This ensures bytes reach nginx
+    during the full duration of LLM inference, preventing proxy_read_timeout (504).
+
     Args:
         request: FastAPI Request object for disconnect detection
     """
@@ -245,17 +251,41 @@ async def astream_chat(
         chat_history=history_text or "(No prior conversation)",
     )
 
-    # Event queue for concurrent heartbeat + LLM tokens
-    event_queue = asyncio.Queue()
-    heartbeat_task = None
+    # Shared queue: both background tasks write here; generator reads and yields.
+    # Queue is consumed item-by-item as events arrive — heartbeats are never
+    # delayed behind LLM tokens because LLM tokens don't exist in the queue yet
+    # during inference. The generator sits at queue.get() and wakes immediately
+    # on whichever event arrives first.
+    event_queue: asyncio.Queue = asyncio.Queue()
+
+    async def on_tool_event(event: dict):
+        """Callback from agent_service for tool events."""
+        await event_queue.put(("tool_event", event))
+
+    async def run_llm():
+        """Background task: run LLM inference, post tokens/errors/done to queue."""
+        try:
+            agent = _get_agent()
+            async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS):
+                async for chunk in agent.astream_analyze(prompt, on_event=on_tool_event):
+                    await event_queue.put(("token", chunk))
+        except TimeoutError:
+            logger.warning(f"[{request_id}] Oversight stream timed out after {OVERSIGHT_LLM_TIMEOUT_SECONDS}s")
+            await event_queue.put(("error", {"error": "timeout"}))
+        except asyncio.CancelledError:
+            pass  # cancelled by generator on client disconnect — expected
+        except Exception as e:
+            logger.error(f"[{request_id}] Oversight stream error: {e}")
+            await event_queue.put(("error", {"error": "stream_failed", "message": str(e)}))
+        finally:
+            # Always signal end so the generator's queue.get() loop can exit
+            await event_queue.put(("stream_done", None))
 
     async def heartbeat_loop():
-        """Send heartbeat pings every N seconds."""
+        """Background task: post a ping every N seconds while LLM is running."""
         while True:
             try:
                 await asyncio.sleep(SSE_HEARTBEAT_INTERVAL_SECONDS)
-                if await is_disconnected():
-                    break
                 await event_queue.put(("heartbeat", None))
                 SSE_HEARTBEATS_SENT.labels(endpoint="oversight").inc()
             except asyncio.CancelledError:
@@ -264,58 +294,29 @@ async def astream_chat(
                 logger.warning(f"[{request_id}] Heartbeat error: {e}")
                 break
 
-    async def on_tool_event(event: dict):
-        """Callback from agent_service for tool events."""
-        await event_queue.put(("tool_event", event))
-
-    # Track active stream
     SSE_ACTIVE_STREAMS.labels(endpoint="oversight").inc()
 
-    # Start heartbeat task
+    # Start both tasks — they run concurrently and independently
+    llm_task = asyncio.create_task(run_llm())
     heartbeat_task = asyncio.create_task(heartbeat_loop())
 
     try:
-        # Stream LLM response with timeout
-        agent = _get_agent()
-        async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS):
-            async for chunk in agent.astream_analyze(prompt, on_event=on_tool_event):
-                if await is_disconnected():
-                    logger.info(f"[{request_id}] Client disconnected during stream")
-                    SSE_DISCONNECTS.labels(endpoint="oversight").inc()
-                    break
-                accumulated += chunk
-                await event_queue.put(("token", chunk))
-
-    except TimeoutError:
-        logger.warning(f"[{request_id}] Oversight stream timed out after {OVERSIGHT_LLM_TIMEOUT_SECONDS}s")
-        await event_queue.put(("error", {"error": "timeout"}))
-
-    except Exception as e:
-        logger.error(f"[{request_id}] Oversight stream error: {e}")
-        await event_queue.put(("error", {"error": "stream_failed", "message": str(e)}))
-
-    finally:
-        # Signal end of stream
-        await event_queue.put(("stream_done", None))
-        # Cancel heartbeat task
-        if heartbeat_task:
-            heartbeat_task.cancel()
+        # Generator main loop: consume queue, yield immediately on each event.
+        # Heartbeats and tokens are interleaved naturally — no event waits for another.
+        while True:
             try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
-        # Decrement active streams counter
-        SSE_ACTIVE_STREAMS.labels(endpoint="oversight").dec()
+                event_type, event_data = await asyncio.wait_for(
+                    event_queue.get(),
+                    timeout=OVERSIGHT_LLM_TIMEOUT_SECONDS + 10,  # outer safety net
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"[{request_id}] Queue drain safety timeout — forcing stream end")
+                break
 
-    # Emit all queued events as SSE
-    while True:
-        try:
-            event_type, event_data = await asyncio.wait_for(event_queue.get(), timeout=1.0)
-
-            # Check disconnect before emitting each event
             if await is_disconnected():
-                logger.info(f"[{request_id}] Client disconnected before event emission")
+                logger.info(f"[{request_id}] Client disconnected")
                 SSE_DISCONNECTS.labels(endpoint="oversight").inc()
+                llm_task.cancel()
                 break
 
             if event_type == "heartbeat":
@@ -325,21 +326,32 @@ async def astream_chat(
                 yield format_sse_event(event_data, event_type=event_data.get("event_type", "tool_status"))
 
             elif event_type == "token":
+                accumulated += event_data
                 yield format_sse_event({"token": event_data}, event_type="message")
 
             elif event_type == "error":
                 yield format_sse_event(event_data, event_type="error")
+                break
 
             elif event_type == "stream_done":
                 break
 
-        except asyncio.TimeoutError:
-            break
-        except Exception as e:
-            logger.error(f"[{request_id}] Event emission error: {e}")
-            break
+    finally:
+        # Always clean up both tasks regardless of how the loop exited
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        if not llm_task.done():
+            llm_task.cancel()
+            try:
+                await llm_task
+            except asyncio.CancelledError:
+                pass
+        SSE_ACTIVE_STREAMS.labels(endpoint="oversight").dec()
 
-    # Final completion event
+    # Final completion event — always emitted so the frontend persistMessage() fires
     latency_ms = int((time.time() - start) * 1000)
     yield format_sse_event(
         {"done": True, "latency_ms": latency_ms},
