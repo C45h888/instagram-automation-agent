@@ -46,24 +46,57 @@ def _cache_key(question: str, business_account_id: str = "") -> str:
 
 
 async def _fetch_auto_context(business_account_id: str, limit: int = 12) -> str:
-    """Fetch recent audit_log decisions for a business account as context.
+    """Fetch recent operational audit_log decisions for a business account as context.
 
-    Returns formatted string of recent decisions for prompt injection.
-    Uses the existing oversight tool function directly (not via LLM).
+    Returns formatted string of recent operational decisions for prompt injection.
+    Deliberately excludes oversight_chat_query entries — those are the agent's own
+    prior chat replies, which are already supplied via the chat_history parameter
+    in the request body (sourced from oversight_chat_sessions.messages).
+    Including them here would duplicate context and pollute operational signal.
     """
-    from config import logger
     from tools.oversight_tools import _get_audit_log_entries
 
-    entries = _get_audit_log_entries(
-        business_account_id=business_account_id,
-        limit=limit,
-    )
+    # Whitelist of operational event types — what the agent actually DID.
+    # oversight_chat_query is intentionally absent: chat history arrives via
+    # the chat_history request param, not from the audit_log.
+    OPERATIONAL_EVENT_TYPES = [
+        "engagement_monitor_comment_processed",
+        "engagement_monitor_escalation",
+        "engagement_monitor_cycle_complete",
+        "content_scheduler_post_evaluated",
+        "content_scheduler_post_published",
+        "content_scheduler_post_publish_failed",
+        "content_scheduler_cycle_complete",
+        "sales_attribution_processed",
+        "sales_attribution_hard_rule",
+        "ugc_discovery_post_processed",
+        "ugc_discovery_cycle_complete",
+        "dm_monitor_message_processed",
+        "dm_monitor_escalation",
+        "dm_monitor_cycle_complete",
+        "analytics_report_generated",
+        "analytics_report_cycle_complete",
+        "weekly_learning_weights_updated",
+    ]
 
-    if not entries:
+    all_entries = []
+    for event_type in OPERATIONAL_EVENT_TYPES:
+        entries = _get_audit_log_entries(
+            business_account_id=business_account_id,
+            event_type=event_type,
+            limit=limit,
+        )
+        all_entries.extend(entries)
+
+    if not all_entries:
         return "(No recent agent decisions found for this account)"
 
+    # Sort by recency and cap at limit
+    all_entries.sort(key=lambda e: e.get("created_at", ""), reverse=True)
+    all_entries = all_entries[:limit]
+
     lines = []
-    for e in entries:
+    for e in all_entries:
         lines.append(
             f"- [{e.get('created_at', '?')}] {e.get('event_type', '?')}: "
             f"action={e.get('action', '?')}, resource={e.get('resource_id', 'N/A')}"
