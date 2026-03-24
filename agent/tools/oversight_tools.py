@@ -8,8 +8,12 @@ These query audit_log and scheduler run data to explain agent decisions.
 """
 
 from typing import Optional
+from cachetools import TTLCache
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
+
+# L1 cache for operational entries — called on every oversight request
+_auto_context_cache: TTLCache = TTLCache(maxsize=50, ttl=45)
 
 
 # ================================
@@ -111,6 +115,51 @@ def _get_run_summary(run_id: str) -> dict:
     }
     _cache_set(cache_key, summary, ttl=45)
     return summary
+
+
+# ================================
+# Internal Auto-Context Query
+# ================================
+def _get_operational_entries(business_account_id: str, limit: int = 12) -> list:
+    """Fetch recent operational audit_log entries for auto-context injection.
+
+    Single-query replacement for the 17-type loop in _fetch_auto_context.
+    Excludes oversight_chat_query at DB level — those arrive via chat_history,
+    not audit_log, so including them would duplicate context.
+
+    Not exposed as a LangChain tool — internal use only.
+    """
+    from services.supabase_service import _execute_query, _cache_get, _cache_set
+    from config import supabase
+
+    cache_key = f"oversight:operational:{business_account_id}:{limit}"
+
+    # L1 check
+    if cache_key in _auto_context_cache:
+        return _auto_context_cache[cache_key]
+
+    # L2 check
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        _auto_context_cache[cache_key] = cached
+        return cached
+
+    # Single query — DB does the exclusion, no Python-side type looping
+    result = _execute_query(
+        supabase.table("audit_log")
+            .select("id,event_type,action,resource_type,resource_id,details,created_at")
+            .filter("details->>business_account_id", "eq", business_account_id)
+            .neq("event_type", "oversight_chat_query")
+            .order("created_at", desc=True)
+            .limit(limit),
+        table="audit_log",
+        operation="select",
+    )
+    entries = result.data or []
+
+    _auto_context_cache[cache_key] = entries
+    _cache_set(cache_key, entries, ttl=45)
+    return entries
 
 
 # ================================

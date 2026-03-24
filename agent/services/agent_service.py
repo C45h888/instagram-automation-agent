@@ -36,11 +36,12 @@ TOOL_TIMEOUT_SECONDS = 5.0
 class AgentService:
     """Invoke LLM with bound tools for context-aware analysis and automation."""
 
-    def __init__(self):
-        self.llm_with_tools = llm.bind_tools(ALL_TOOLS)
-        self._tool_map = {t.name: t for t in ALL_TOOLS}
+    def __init__(self, tools=None):
+        tool_list = tools if tools is not None else ALL_TOOLS
+        self.llm_with_tools = llm.bind_tools(tool_list)
+        self._tool_map = {t.name: t for t in tool_list}
         logger.info(
-            f"AgentService initialized with {len(ALL_TOOLS)} tools "
+            f"AgentService initialized with {len(tool_list)} tools "
             f"(max_concurrent={MAX_CONCURRENT_LLM}, tool_timeout={TOOL_TIMEOUT_SECONDS}s): "
             f"{list(self._tool_map.keys())}"
         )
@@ -123,72 +124,63 @@ class AgentService:
     async def _astream(self, prompt: str, on_event=None):
         """Async streaming LLM invocation with tool support.
 
-        Args:
-            prompt: Prompt to send to LLM
-            on_event: Optional async callback(event: dict) for tool events
-
         Flow:
-          1. Non-streaming invoke to detect tool calls
-          2. If tools called, emit events and execute them, then stream follow-up
-          3. If no tools, stream directly (yield the already-complete initial response)
+          1. Stream first pass — yields tokens to caller in real time while accumulating
+             chunks for tool call detection. No blocking invoke.
+          2. If tool calls detected in accumulated result: execute tools, stream second
+             pass with enriched context. Tool outputs injected via _build_enriched_prompt.
+          3. If no tool calls: stream is already complete, response delivered in step 1.
+
+        Path A (no tools): single streaming pass, first token arrives immediately.
+        Path B (tools needed): first pass accumulates tool call JSON (no text tokens),
+        tools execute, second streaming pass delivers the final answer.
         """
         start_time = time.time()
 
         try:
-            # Prepend system prompt for consistent behavior
             full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
 
-            # Step 1: Initial invoke (non-streaming) to detect tool calls
-            result = await asyncio.to_thread(self.llm_with_tools.invoke, full_prompt)
-            tool_calls = getattr(result, "tool_calls", [])
+            # Step 1: Stream first pass — deliver tokens in real time and accumulate
+            # chunks so tool_calls can be inspected after the stream completes.
+            accumulated = None
+            async for chunk in self.llm_with_tools.astream(full_prompt):
+                text = chunk.content if hasattr(chunk, "content") else ""
+                if text:
+                    yield text
+                accumulated = chunk if accumulated is None else accumulated + chunk
 
-            # Step 2: Execute tool calls with event emission
+            tool_calls = getattr(accumulated, "tool_calls", []) if accumulated else []
+
+            # Step 2: Execute tool calls if the model requested them
             tool_outputs = {}
             if tool_calls:
-                # Emit tool_call events before execution
                 for call in tool_calls:
                     tool_name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
                     if on_event:
-                        await on_event({
-                            "event_type": "tool_call",
-                            "tool_name": tool_name,
-                        })
+                        await on_event({"event_type": "tool_call", "tool_name": tool_name})
 
                 tool_start = time.time()
                 tool_outputs = await self._execute_tool_calls_async(tool_calls)
                 tool_elapsed_ms = int((time.time() - tool_start) * 1000)
 
-                # Emit tool_done events after execution
                 for call in tool_calls:
                     tool_name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
                     if on_event:
-                        await on_event({
-                            "event_type": "tool_done",
-                            "tool_name": tool_name,
-                            "elapsed_ms": tool_elapsed_ms,
-                        })
+                        await on_event({"event_type": "tool_done", "tool_name": tool_name, "elapsed_ms": tool_elapsed_ms})
 
-                # If tools were called, stream the follow-up with tool context
+                # Stream second pass with tool results injected into context
                 if tool_outputs:
                     enriched_prompt = self._build_enriched_prompt(full_prompt, tool_outputs)
                     async for chunk in self.llm_with_tools.astream(enriched_prompt):
                         text = chunk.content if hasattr(chunk, "content") else str(chunk)
                         if text:
                             yield text
-                    return
-
-            # Step 3: No tools -- yield the already-completed initial response
-            raw_text = result.content if hasattr(result, "content") else str(result)
-            yield raw_text
 
         except Exception as e:
             latency_ms = int((time.time() - start_time) * 1000)
             logger.error(f"AgentService stream failed (latency={latency_ms}ms): {e}")
             LLM_ERRORS.labels(error_type="agent_stream_failed").inc()
-            yield json.dumps({
-                "error": "agent_stream_failed",
-                "message": str(e),
-            })
+            yield json.dumps({"error": "agent_stream_failed", "message": str(e)})
 
     async def _execute_tool_calls_async(self, tool_calls: list) -> dict:
         """Execute tool calls in parallel with timeout handling.

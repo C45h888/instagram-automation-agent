@@ -1,10 +1,12 @@
 """
 Oversight Brain Service
 =======================
-Thin wrapper around AgentService for explainability queries.
+Explainability service for the Oversight Brain chat interface.
 
 Pattern: build prompt → AgentService.analyze_async() → log → return
-No new LLM instance. No custom tool execution. Uses the single LLM entry point.
+Uses a dedicated AgentService singleton bound to OVERSIGHT_TOOLS only (2 read-only
+tools: get_audit_log_entries, get_run_summary). Isolated from the automation
+AgentService so oversight queries cannot invoke automation or supabase write tools.
 
 Caching: L1 TTLCache + L2 Redis (same pattern as supabase_service.py).
 Conversation-aware: skips cache when chat_history is provided.
@@ -35,7 +37,8 @@ def _get_agent():
     global _agent_service
     if _agent_service is None:
         from services.agent_service import AgentService  # lazy import: avoids circular
-        _agent_service = AgentService()
+        from tools.oversight_tools import OVERSIGHT_TOOLS
+        _agent_service = AgentService(tools=OVERSIGHT_TOOLS)
     return _agent_service
 
 
@@ -46,57 +49,20 @@ def _cache_key(question: str, business_account_id: str = "") -> str:
 
 
 async def _fetch_auto_context(business_account_id: str, limit: int = 12) -> str:
-    """Fetch recent operational audit_log decisions for a business account as context.
+    """Format recent operational audit_log decisions for prompt injection.
 
-    Returns formatted string of recent operational decisions for prompt injection.
-    Deliberately excludes oversight_chat_query entries — those are the agent's own
-    prior chat replies, which are already supplied via the chat_history parameter
-    in the request body (sourced from oversight_chat_sessions.messages).
-    Including them here would duplicate context and pollute operational signal.
+    Query logic lives in _get_operational_entries (oversight_tools.py).
+    This function owns only formatting — no query logic, no type lists.
     """
-    from tools.oversight_tools import _get_audit_log_entries
+    from tools.oversight_tools import _get_operational_entries
 
-    # Whitelist of operational event types — what the agent actually DID.
-    # oversight_chat_query is intentionally absent: chat history arrives via
-    # the chat_history request param, not from the audit_log.
-    OPERATIONAL_EVENT_TYPES = [
-        "engagement_monitor_comment_processed",
-        "engagement_monitor_escalation",
-        "engagement_monitor_cycle_complete",
-        "content_scheduler_post_evaluated",
-        "content_scheduler_post_published",
-        "content_scheduler_post_publish_failed",
-        "content_scheduler_cycle_complete",
-        "sales_attribution_processed",
-        "sales_attribution_hard_rule",
-        "ugc_discovery_post_processed",
-        "ugc_discovery_cycle_complete",
-        "dm_monitor_message_processed",
-        "dm_monitor_escalation",
-        "dm_monitor_cycle_complete",
-        "analytics_report_generated",
-        "analytics_report_cycle_complete",
-        "weekly_learning_weights_updated",
-    ]
+    entries = _get_operational_entries(business_account_id, limit)
 
-    all_entries = []
-    for event_type in OPERATIONAL_EVENT_TYPES:
-        entries = _get_audit_log_entries(
-            business_account_id=business_account_id,
-            event_type=event_type,
-            limit=limit,
-        )
-        all_entries.extend(entries)
-
-    if not all_entries:
+    if not entries:
         return "(No recent agent decisions found for this account)"
 
-    # Sort by recency and cap at limit
-    all_entries.sort(key=lambda e: e.get("created_at", ""), reverse=True)
-    all_entries = all_entries[:limit]
-
     lines = []
-    for e in all_entries:
+    for e in entries:
         lines.append(
             f"- [{e.get('created_at', '?')}] {e.get('event_type', '?')}: "
             f"action={e.get('action', '?')}, resource={e.get('resource_id', 'N/A')}"
@@ -155,9 +121,14 @@ async def chat(
     from config import OVERSIGHT_AUTO_CONTEXT_LIMIT
     auto_context = await _fetch_auto_context(business_account_id, limit=OVERSIGHT_AUTO_CONTEXT_LIMIT)
 
-    prompt = PromptService.get("oversight_brain").format(
-        input=f"{auto_context}\n\n{question}",
-        chat_history=history_text or "(No prior conversation)",
+    prompt = (
+        "INSTRUCTION: You are in read-only explainability mode. "
+        "Answer from the injected context below. Do NOT call tools unless data is explicitly absent. "
+        "Make at most one tool call total.\n\n"
+        + PromptService.get("oversight_brain").format(
+            input=f"{auto_context}\n\n{question}",
+            chat_history=history_text or "(No prior conversation)",
+        )
     )
 
     # --- Single LLM entry point with timeout protection ---
@@ -279,9 +250,14 @@ async def astream_chat(
         limit=OVERSIGHT_AUTO_CONTEXT_LIMIT,
     )
 
-    prompt = PromptService.get("oversight_brain").format(
-        input=f"{auto_context}\n\n{question}",
-        chat_history=history_text or "(No prior conversation)",
+    prompt = (
+        "INSTRUCTION: You are in read-only explainability mode. "
+        "Answer from the injected context below. Do NOT call tools unless data is explicitly absent. "
+        "Make at most one tool call total.\n\n"
+        + PromptService.get("oversight_brain").format(
+            input=f"{auto_context}\n\n{question}",
+            chat_history=history_text or "(No prior conversation)",
+        )
     )
 
     # Shared queue: both background tasks write here; generator reads and yields.
