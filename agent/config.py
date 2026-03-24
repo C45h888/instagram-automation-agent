@@ -138,12 +138,12 @@ llm = ChatOllama(
     base_url=OLLAMA_HOST,
     timeout=10,
     temperature=0.3,  # Lower for consistent analysis
-    think=False,      # Disable Qwen3 thinking mode globally — all agent flows execute
-                      # directly without internal reasoning preamble. Thinking mode adds
-                      # 500-2000 silent tokens before any output, causing timeouts on CPU.
-                      # This is the single shared LLM instance used by every flow:
-                      # oversight brain, engagement monitor, content scheduler,
-                      # attribution, analytics, DM monitor — none require thinking mode.
+    model_kwargs={"think": False},  # Disable Qwen3 thinking mode globally via model_kwargs
+                                    # (ChatOllama passes model_kwargs directly to Ollama API).
+                                    # think=False skips the 500-2000 token internal reasoning
+                                    # preamble that causes timeouts on CPU inference.
+                                    # Applies to all flows: oversight, engagement monitor,
+                                    # content scheduler, attribution, analytics, DM monitor.
 )
 
 # ================================
