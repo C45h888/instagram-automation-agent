@@ -122,8 +122,8 @@ services:
       - REDIS_HOST=redis                          # Docker-internal: agent → redis
       - REDIS_PORT=6379
       - BACKEND_API_URL=https://api.888intelligenceautomation.in  # via nginx reverse proxy
-      - OVERSIGHT_LLM_TIMEOUT_SECONDS=120         # Nemotron 8B on 8 vCPU needs 60-90s on cold prompt
-      - OVERSIGHT_AUTO_CONTEXT_LIMIT=5            # Reduce prompt tokens: 5 recent ops vs 12
+      - OVERSIGHT_LLM_TIMEOUT_SECONDS=120 # Qwen2.5:7b at 5-8 t/s: 50-150 tokens = 10-30s
+      - OVERSIGHT_AUTO_CONTEXT_LIMIT=5            # 5 recent ops is sufficient context; increase if answers lack history
     depends_on:
       ollama:
         condition: service_healthy

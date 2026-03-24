@@ -128,22 +128,16 @@ def validate_schema():
 
 
 # ================================
-# Ollama / Nemotron LLM
+# Ollama / Qwen2.5 LLM (dev/test — swap OLLAMA_MODEL env var to restore Nemotron on GPU)
 # ================================
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "hf.co/MaziyarPanahi/Nemotron-Orchestrator-8B-GGUF:Q4_K_M")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF/qwen2.5-7b-instruct-q4_k_m")
 
 llm = ChatOllama(
     model=OLLAMA_MODEL,
     base_url=OLLAMA_HOST,
     timeout=10,
-    temperature=0.3,  # Lower for consistent analysis
-    model_kwargs={"think": False},  # Disable Qwen3 thinking mode globally via model_kwargs
-                                    # (ChatOllama passes model_kwargs directly to Ollama API).
-                                    # think=False skips the 500-2000 token internal reasoning
-                                    # preamble that causes timeouts on CPU inference.
-                                    # Applies to all flows: oversight, engagement monitor,
-                                    # content scheduler, attribution, analytics, DM monitor.
+    temperature=0.3,
 )
 
 # ================================

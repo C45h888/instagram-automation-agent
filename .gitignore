@@ -14,7 +14,6 @@ __pycache__/
 .pytest_cache/
 
 # ─── Docker build artefacts (local dev files) ──────────
-agent/docker-compose.agent-only.yml
 docker-compose.local.yml
 
 # ─── OS / Editor ────────────────────────────────────────────

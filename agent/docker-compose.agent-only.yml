@@ -1,0 +1,123 @@
+version: '3.9'
+
+services:
+  # ================================
+  # Ollama AI Model Server
+  # ================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    # entrypoint overrides the image's /bin/ollama ENTRYPOINT so the command
+    # runs as a plain shell invocation, not `ollama sh -c ...` (which fails).
+    entrypoint: /bin/sh
+    command: >
+      -c "ollama serve &
+          until ollama list > /dev/null 2>&1; do sleep 3; done &&
+          bash /startup.sh;
+          wait"
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+      - ./startup.sh:/startup.sh:ro
+    networks:
+      - agent-network
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s  # Increased for model pull time
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 6G
+
+  # ================================
+  # Redis Cache (for agent)
+  # ================================
+  redis:
+    image: redis:7-alpine
+    container_name: agent-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - agent-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  # ================================
+  # LangChain Agent (Instagram Automation)
+  # ================================
+  langchain-agent:
+    container_name: langchain-agent
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    env_file:
+      - ../.env
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF/qwen2.5-7b-instruct-q4_k_m
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - MAX_CONCURRENT_LLM=4
+    depends_on:
+      ollama:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agent-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+
+# ================================
+# Networks
+# ================================
+networks:
+  agent-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+
+# ================================
+# Volumes
+# ================================
+volumes:
+  ollama-data:
+    driver: local
