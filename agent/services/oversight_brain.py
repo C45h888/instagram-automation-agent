@@ -356,7 +356,7 @@ async def astream_chat(
     def format_sse_event(payload: dict, event_type: str = "message") -> str:
         nonlocal event_id
         event_id += 1
-        data = json_mod.dumps(payload)
+        data = json.dumps(payload)
         return f"id: {event_id}\nevent: {event_type}\ndata: {data}\nretry: 3000\n\n"
 
     # Helper: check if client disconnected
@@ -458,7 +458,7 @@ async def astream_chat(
                         # Second pass: inject result, stream final answer
                         second_prompt = (
                             f"{prompt}\n\n"
-                            f"[TOOL_RESULT for {call['name']}]:\n{json_mod.dumps(tool_result, default=str, indent=2)}\n\n"
+                            f"[TOOL_RESULT for {call['name']}]:\n{json.dumps(tool_result, default=str, indent=2)}\n\n"
                             "Using the tool result above, provide your final answer as JSON."
                         )
 
