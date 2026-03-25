@@ -84,12 +84,6 @@ SSE_DISCONNECTS = Counter(
     ["endpoint"],
 )
 
-SSE_HEARTBEATS_SENT = Counter(
-    "agent_sse_heartbeats_total",
-    "SSE heartbeat pings sent to clients",
-    ["endpoint"],
-)
-
 SSE_ACTIVE_STREAMS = Gauge(
     "agent_sse_active_streams",
     "Active SSE streams by endpoint",

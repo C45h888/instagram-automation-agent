@@ -27,7 +27,7 @@ from cachetools import TTLCache
 from config import llm, logger
 from services.supabase_service import SupabaseService, _cache_get, _cache_set
 from services.prompt_service import PromptService
-from metrics import SSE_DISCONNECTS, SSE_HEARTBEATS_SENT, SSE_ACTIVE_STREAMS, TOOL_CALLS
+from metrics import SSE_DISCONNECTS, SSE_ACTIVE_STREAMS, TOOL_CALLS
 
 
 # L1 in-memory cache (mirrors supabase_service.py pattern)
@@ -344,13 +344,18 @@ async def astream_chat(
     - Optional tool calls via <<TOOL_CALL:...>> text syntax
     - Tool execution triggers "tool_status" SSE event (user sees "thinking...")
     - Second-pass LLM stream delivers final answer after tool results injected
-    - Event IDs, heartbeat pings, disconnect detection — all preserved
+    - Event IDs, disconnect detection — all preserved
+
+    Note: SSE keepalive is handled by the Express backend (setInterval / : ping\\n\\n).
+    The Flask-side heartbeat loop has been removed — it created a queue race condition
+    that starved token events on fast 8B models.
     """
-    from config import OVERSIGHT_AUTO_CONTEXT_LIMIT, OVERSIGHT_LLM_TIMEOUT_SECONDS, SSE_HEARTBEAT_INTERVAL_SECONDS
+    from config import OVERSIGHT_AUTO_CONTEXT_LIMIT, OVERSIGHT_LLM_TIMEOUT_SECONDS
 
     start = time.time()
     event_id = 0
     accumulated = ""
+    tool_was_called = False
 
     # Helper: format SSE event with id and event type
     def format_sse_event(payload: dict, event_type: str = "message") -> str:
@@ -393,24 +398,21 @@ async def astream_chat(
         )
     )
 
-    # Shared queue: both background tasks write here; generator reads and yields.
-    # Queue is consumed item-by-item as events arrive — heartbeats are never
-    # delayed behind LLM tokens because LLM tokens don't exist in the queue yet
-    # during inference. The generator sits at queue.get() and wakes immediately
-    # on whichever event arrives first.
-    event_queue: asyncio.Queue = asyncio.Queue()
-    tool_was_called = False
+    async def _stream_llm_and_tools():
+        """Direct async generator: streams LLM tokens and handles tool calls inline.
 
-    async def run_llm():
-        """Background task: run direct LLM stream, detect tool call markers, execute tools."""
+        Yields SSE-formatted event strings directly — no intermediate queue.
+        The _llm_semaphore prevents concurrent Ollama streams (CPU overload protection).
+        """
         nonlocal tool_was_called
-        try:
-            async with _llm_semaphore:
-                # First pass: stream tokens, detect tool call markers
-                buffer = ""
-                tool_call_detected = False
-                tool_call_full = ""  # accumulate the complete <<TOOL_CALL:...>> block
 
+        async with _llm_semaphore:
+            # First pass: stream tokens, detect tool call markers
+            buffer = ""
+            tool_call_detected = False
+            tool_call_full = ""  # accumulate the complete <<TOOL_CALL:...>> block
+
+            try:
                 async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS):
                     async for chunk in llm.astream(prompt):
                         text = chunk.content if hasattr(chunk, "content") else ""
@@ -422,46 +424,54 @@ async def astream_chat(
                             tool_call_detected = True
                             tool_call_full += text
                             buffer += text
-                            # Keep yielding text BEFORE the tool marker (preface)
-                            # We yield after the tool marker is complete
                             if TOOL_CALL_CLOSE in tool_call_full:
-                                # Extract text before marker, yield that
+                                # Extract text before marker and yield that
                                 marker_start = tool_call_full.find(TOOL_CALL_OPEN)
                                 before_marker = tool_call_full[:marker_start]
                                 if before_marker:
-                                    accumulated_local = before_marker
-                                    await event_queue.put(("token", accumulated_local))
+                                    accumulated += before_marker
+                                    yield format_sse_event({"token": before_marker}, "message")
                                 break
                         else:
                             buffer += text
-                            await event_queue.put(("token", text))
+                            accumulated += text
+                            yield format_sse_event({"token": text}, "message")
 
-                # Check if a tool call was detected
-                if tool_call_detected and tool_call_full:
-                    # Parse tool call
-                    calls = _parse_tool_calls(tool_call_full)
-                    if calls:
-                        tool_was_called = True
-                        call = calls[0]  # handle one at a time
-                        logger.info(f"[{request_id}] Oversight LLM requested tool: {call['name']}")
+            except asyncio.TimeoutError:
+                logger.warning(f"[{request_id}] Oversight stream timed out after {OVERSIGHT_LLM_TIMEOUT_SECONDS}s")
+                yield format_sse_event({"error": "timeout", "message": "LLM timed out"}, "error")
+                return
+            except Exception as e:
+                logger.error(f"[{request_id}] Oversight stream error: {e}")
+                yield format_sse_event({"error": "stream_failed", "message": str(e)}, "error")
+                return
 
-                        # Tell user tool is being called
-                        await event_queue.put(("tool_status", {
-                            "status": "calling",
-                            "tool_name": call["name"],
-                            "message": f"Fetching {call['name']} data...",
-                        }))
+            # Check if a tool call was detected and execute it
+            if tool_call_detected and tool_call_full:
+                calls = _parse_tool_calls(tool_call_full)
+                if calls:
+                    tool_was_called = True
+                    call = calls[0]  # handle one at a time
+                    logger.info(f"[{request_id}] Oversight LLM requested tool: {call['name']}")
 
-                        # Execute tool
-                        tool_result = await _execute_oversight_tool(call["name"], call["args"])
+                    # Emit tool_status event inline
+                    yield format_sse_event({
+                        "status": "calling",
+                        "tool_name": call["name"],
+                        "message": f"Fetching {call['name']} data...",
+                    }, "tool_status")
 
-                        # Second pass: inject result, stream final answer
-                        second_prompt = (
-                            f"{prompt}\n\n"
-                            f"[TOOL_RESULT for {call['name']}]:\n{json.dumps(tool_result, default=str, indent=2)}\n\n"
-                            "Using the tool result above, provide your final answer as JSON."
-                        )
+                    # Execute tool
+                    tool_result = await _execute_oversight_tool(call["name"], call["args"])
 
+                    # Second pass: inject result and stream final answer
+                    second_prompt = (
+                        f"{prompt}\n\n"
+                        f"[TOOL_RESULT for {call['name']}]:\n{json.dumps(tool_result, default=str, indent=2)}\n\n"
+                        "Using the tool result above, provide your final answer as JSON."
+                    )
+
+                    try:
                         async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS):
                             async for chunk in llm.astream(second_prompt):
                                 text = chunk.content if hasattr(chunk, "content") else ""
@@ -469,84 +479,31 @@ async def astream_chat(
                                     # Clean any residual tool markers
                                     cleaned = re.sub(r"<<TOOL_CALL:[^>]+>>", "", text)
                                     if cleaned:
-                                        await event_queue.put(("token", cleaned))
-
-        except asyncio.TimeoutError:
-            logger.warning(f"[{request_id}] Oversight stream timed out after {OVERSIGHT_LLM_TIMEOUT_SECONDS}s")
-            await event_queue.put(("error", {"error": "timeout", "message": "LLM timed out"}))
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"[{request_id}] Oversight stream error: {e}")
-            await event_queue.put(("error", {"error": "stream_failed", "message": str(e)}))
-        finally:
-            await event_queue.put(("stream_done", None))
-
-    async def heartbeat_loop():
-        """Background task: post a ping every N seconds while LLM is running."""
-        while True:
-            try:
-                await asyncio.sleep(SSE_HEARTBEAT_INTERVAL_SECONDS)
-                await event_queue.put(("heartbeat", None))
-                SSE_HEARTBEATS_SENT.labels(endpoint="oversight").inc()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning(f"[{request_id}] Heartbeat error: {e}")
-                break
+                                        accumulated += cleaned
+                                        yield format_sse_event({"token": cleaned}, "message")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"[{request_id}] Oversight second-pass timed out")
+                        yield format_sse_event({"error": "timeout", "message": "Second-pass LLM timed out"}, "error")
+                    except Exception as e2:
+                        logger.warning(f"[{request_id}] Oversight second-pass failed: {e2}")
+                        yield format_sse_event({"error": "stream_failed", "message": str(e2)}, "error")
 
     SSE_ACTIVE_STREAMS.labels(endpoint="oversight").inc()
 
-    # Start both tasks — they run concurrently and independently
-    llm_task = asyncio.create_task(run_llm())
-    heartbeat_task = asyncio.create_task(heartbeat_loop())
-
     try:
-        while True:
-            try:
-                event_type, event_data = await asyncio.wait_for(
-                    event_queue.get(),
-                    timeout=OVERSIGHT_LLM_TIMEOUT_SECONDS + 10,  # outer safety net
-                )
-            except asyncio.TimeoutError:
-                logger.warning(f"[{request_id}] Queue drain safety timeout — forcing stream end")
-                break
+        # Outer timeout as safety net for stalled generators
+        async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS + 10):
+            async for sse_event in _stream_llm_and_tools():
+                if await is_disconnected():
+                    logger.info(f"[{request_id}] Client disconnected")
+                    SSE_DISCONNECTS.labels(endpoint="oversight").inc()
+                    break
+                yield sse_event
 
-            if await is_disconnected():
-                logger.info(f"[{request_id}] Client disconnected")
-                SSE_DISCONNECTS.labels(endpoint="oversight").inc()
-                llm_task.cancel()
-                break
-
-            if event_type == "heartbeat":
-                yield format_sse_event({"heartbeat": True}, event_type="ping")
-
-            elif event_type == "tool_status":
-                yield format_sse_event(event_data, event_type="tool_status")
-
-            elif event_type == "token":
-                accumulated += event_data
-                yield format_sse_event({"token": event_data}, event_type="message")
-
-            elif event_type == "error":
-                yield format_sse_event(event_data, event_type="error")
-                break
-
-            elif event_type == "stream_done":
-                break
+    except asyncio.TimeoutError:
+        logger.warning(f"[{request_id}] Oversight stream outer timeout — forcing end")
 
     finally:
-        heartbeat_task.cancel()
-        try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
-        if not llm_task.done():
-            llm_task.cancel()
-            try:
-                await llm_task
-            except asyncio.CancelledError:
-                pass
         SSE_ACTIVE_STREAMS.labels(endpoint="oversight").dec()
 
     # Final completion event — always emitted so the frontend persistMessage() fires
