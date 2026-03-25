@@ -128,15 +128,15 @@ def validate_schema():
 
 
 # ================================
-# Ollama / Qwen2.5 LLM (dev/test — swap OLLAMA_MODEL env var to restore Nemotron on GPU)
+# Ollama / Llama 3.1 LLM (swap OLLAMA_MODEL env var to use a different model)
 # ================================
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF/qwen2.5-7b-instruct-q4_k_m")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
 llm = ChatOllama(
     model=OLLAMA_MODEL,
     base_url=OLLAMA_HOST,
-    timeout=10,
+    timeout=60,  # 60s for CPU inference — Llama 3.1 8B needs more time than qwen2.5
     temperature=0.3,
 )
 
