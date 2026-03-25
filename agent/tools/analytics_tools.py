@@ -7,9 +7,8 @@ for the analytics reports pipeline.
 Called by scheduler/analytics_reports.py —
 NOT registered as LangChain tools (internal pipeline functions).
 
-Mirrors attribution_tools.py / content_tools.py pattern:
-pure functions for deterministic math, single LLM call via
-AgentService.analyze_async() for optional insights.
+Pure functions for deterministic math, direct llm.invoke() for optional insights
+(no bind_tools(), no scoped tool binding — mirrors content_tools.py pattern).
 """
 
 import json
@@ -21,23 +20,12 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import (
     logger,
+    llm,
     BACKEND_INSIGHTS_ENDPOINT,
     BACKEND_TIMEOUT_SECONDS,
     ANALYTICS_LLM_INSIGHTS_ENABLED,
     backend_headers,
 )
-
-
-# ================================
-# Singleton AgentService (lazy import to avoid circular)
-# ================================
-_agent_service = None
-def _get_agent_service():
-    global _agent_service
-    if _agent_service is None:
-        from services.agent_service import AgentService
-        _agent_service = AgentService(scope="content")
-    return _agent_service
 
 
 # ================================
@@ -484,10 +472,8 @@ async def generate_llm_insights(
     """Single LLM call for deeper insights.
 
     Only called when ANALYTICS_LLM_INSIGHTS_ENABLED=true.
-    Uses AgentService.analyze_async() — mirrors content_tools.py pattern.
+    Direct llm.invoke() — no bind_tools(), no scoped tool binding.
     """
-    agent_svc = _get_agent_service()
-
     from services.prompt_service import PromptService
     prompt_template = PromptService.get("generate_analytics_insights")
     prompt = prompt_template.format(
@@ -499,7 +485,11 @@ async def generate_llm_insights(
     )
 
     try:
-        result = await agent_svc.analyze_async(prompt)
+        raw_response = await asyncio.to_thread(llm.invoke, prompt)
+        from services.agent_service import AgentService
+        result = AgentService._parse_json_response(
+            raw_response.content if hasattr(raw_response, "content") else str(raw_response)
+        )
         if "error" not in result:
             return {
                 "trends": result.get("trends", []),

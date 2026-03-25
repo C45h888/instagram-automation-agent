@@ -16,6 +16,7 @@ Functions:
   - _publish_post:             Backend proxy with retry
 """
 
+import asyncio
 import random
 from datetime import datetime, timezone, timedelta
 
@@ -23,6 +24,7 @@ import uuid as _uuid
 
 from config import (
     logger,
+    llm,
     SUPABASE_URL,
     POST_APPROVAL_THRESHOLD,
     MAX_CAPTION_LENGTH,
@@ -30,21 +32,6 @@ from config import (
     CONTENT_SCHEDULER_MAX_ASSETS_TO_SCORE,
 )
 from services.supabase_service import SupabaseService
-
-
-# ================================
-# Singleton Agent Service (lazy import to avoid circular)
-# ================================
-_agent_service = None
-
-
-def _get_agent_service():
-    """Lazy import to avoid circular dependency."""
-    global _agent_service
-    if _agent_service is None:
-        from services.agent_service import AgentService
-        _agent_service = AgentService(scope="content")
-    return _agent_service
 
 
 # ================================
@@ -244,10 +231,14 @@ async def generate_and_evaluate(
         selection_score=asset.get("_score", 0),
     )
 
-    agent = _get_agent_service()
-
     try:
-        result = await agent.analyze_async(prompt)
+        # Direct LLM call — no bind_tools(), no scoped tool binding.
+        # The prompt has all context pre-injected; the model just outputs JSON.
+        raw_response = await asyncio.to_thread(llm.invoke, prompt)
+        from services.agent_service import AgentService
+        result = AgentService._parse_json_response(
+            raw_response.content if hasattr(raw_response, "content") else str(raw_response)
+        )
     except Exception as e:
         logger.error(f"LLM caption generation failed: {e}")
         result = _template_fallback(asset)

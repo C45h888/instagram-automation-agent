@@ -7,34 +7,21 @@ and LLM-powered quality validation.
 Called by webhook_order.py and weekly_attribution_learning.py —
 NOT registered as LangChain tools (internal pipeline functions).
 
-Mirrors content_tools.py pattern: pure functions for deterministic math,
-single LLM call via AgentService.analyze_async() for validation.
+LLM evaluation uses direct llm.invoke() — no bind_tools(), no scoped tool binding.
 """
 
+import asyncio
 import math
 from datetime import datetime, timezone
 
 from config import (
     logger,
+    llm,
     SALES_ATTRIBUTION_AUTO_APPROVE_THRESHOLD,
     SALES_ATTRIBUTION_FRAUD_SCORE_THRESHOLD,
     SALES_ATTRIBUTION_MAX_TOUCHPOINTS,
     SALES_ATTRIBUTION_VERSION,
 )
-
-
-# ================================
-# Singleton Agent Service (lazy import to avoid circular)
-# ================================
-_agent_service = None
-
-
-def _get_agent_service():
-    global _agent_service
-    if _agent_service is None:
-        from services.agent_service import AgentService
-        _agent_service = AgentService(scope="attribution")
-    return _agent_service
 
 
 # ================================
@@ -456,10 +443,14 @@ async def evaluate_attribution(
         attribution_score=model_scores.get("final_weighted", 0),
     )
 
-    agent = _get_agent_service()
-
     try:
-        result = await agent.analyze_async(prompt)
+        # Direct LLM call — no bind_tools(), no scoped tool binding.
+        # The prompt has all attribution data pre-injected; the model just validates and outputs JSON.
+        raw_response = await asyncio.to_thread(llm.invoke, prompt)
+        from services.agent_service import AgentService
+        result = AgentService._parse_json_response(
+            raw_response.content if hasattr(raw_response, "content") else str(raw_response)
+        )
     except Exception as e:
         logger.error(f"LLM attribution evaluation failed: {e}")
         return _evaluation_fallback()
