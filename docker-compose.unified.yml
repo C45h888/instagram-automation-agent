@@ -122,7 +122,7 @@ services:
       - REDIS_HOST=redis                          # Docker-internal: agent → redis
       - REDIS_PORT=6379
       - BACKEND_API_URL=https://api.888intelligenceautomation.in  # via nginx reverse proxy
-      - OVERSIGHT_LLM_TIMEOUT_SECONDS=120 # Llama 3.1:8b at 5-8 t/s: 50-150 tokens = 10-30s
+      - OVERSIGHT_LLM_TIMEOUT_SECONDS=120 # Nemotron Orchestrator 8B GGUF — tool calling capable
       - OVERSIGHT_AUTO_CONTEXT_LIMIT=5            # 5 recent ops is sufficient context; increase if answers lack history
     depends_on:
       ollama:
