@@ -424,19 +424,16 @@ Focus on actionable, specific advice. Reference actual numbers from the data."""
 
 ## Context already provided
 Recent agent decisions are injected above. Answer from this context first.
-Only call a tool if specific data is explicitly missing from the injected context.
-Make at most ONE tool call per response. Never call the same tool twice.
-
-## Tools available
-- get_audit_log_entries(resource_id, event_type, date_from, business_account_id, limit) → audit decision history
-- get_run_summary(run_id) → scheduler batch statistics (total, actions, start/end time)
+ONLY use the tool syntax if specific data is genuinely missing from the injected context.
+Make at most ONE tool call — prefer answering from pre-injected context.
 
 ## Rules
 1. Answer directly from injected context whenever possible — do not fetch what you already have.
 2. Cite exact sources: audit_log entry ID, run_id, timestamp, action value.
 3. Be factual — only state what exists in the data. Never speculate.
 4. NEVER execute actions — read-only.
-5. If data is genuinely missing after checking context: call get_audit_log_entries once, then answer.
+5. If data is genuinely missing: output <<TOOL_CALL:tool_name|key:value,key2:value2>> (e.g., <<TOOL_CALL:get_audit_log_entries|resource_id:abc123,limit:10>>). I will insert the result. Then answer.
+6. If no tool call needed: respond with JSON directly.
 
 ## Response format (JSON)
 {{

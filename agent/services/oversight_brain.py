@@ -3,10 +3,12 @@ Oversight Brain Service
 =======================
 Explainability service for the Oversight Brain chat interface.
 
-Pattern: build prompt → AgentService.analyze_async() → log → return
-Uses a dedicated AgentService singleton bound to OVERSIGHT_TOOLS only (2 read-only
-tools: get_audit_log_entries, get_run_summary). Isolated from the automation
-AgentService so oversight queries cannot invoke automation or supabase write tools.
+Pattern: build prompt with auto-context → direct llm.invoke/astream → optional tool calls
+No bind_tools() — the LLM generates text directly from pre-injected context.
+Tool descriptions are embedded as readable text in the prompt. The LLM uses a
+special syntax <<TOOL:...>> to request a tool call when data is genuinely missing.
+Tool execution is handled inline without AgentService, keeping oversight isolated
+from the automation tool layer.
 
 Caching: L1 TTLCache + L2 Redis (same pattern as supabase_service.py).
 Conversation-aware: skips cache when chat_history is provided.
@@ -14,38 +16,121 @@ Conversation-aware: skips cache when chat_history is provided.
 
 import asyncio
 import hashlib
+import json
+import re
 import time
 import uuid as uuid_mod
 from typing import Optional
 
 from cachetools import TTLCache
 
-from config import logger
+from config import llm, logger
 from services.supabase_service import SupabaseService, _cache_get, _cache_set
 from services.prompt_service import PromptService
-from metrics import SSE_DISCONNECTS, SSE_HEARTBEATS_SENT, SSE_ACTIVE_STREAMS
+from metrics import SSE_DISCONNECTS, SSE_HEARTBEATS_SENT, SSE_ACTIVE_STREAMS, TOOL_CALLS
 
 
 # L1 in-memory cache (mirrors supabase_service.py pattern)
 _question_cache: TTLCache = TTLCache(maxsize=100, ttl=300)  # 5-minute TTL
 
-# Lazy singleton AgentService — mirrors _get_agent_service() in automation_tools.py
-_agent_service = None
+# Semaphore — limits concurrent LLM calls to protect Ollama CPU
+_llm_semaphore = asyncio.Semaphore(2)
 
+# Tool call timeout per tool
+TOOL_TIMEOUT_SECONDS = 5.0
 
-def _get_agent():
-    global _agent_service
-    if _agent_service is None:
-        from services.agent_service import AgentService  # lazy import: avoids circular
-        from tools.oversight_tools import OVERSIGHT_TOOLS
-        _agent_service = AgentService(tools=OVERSIGHT_TOOLS)
-    return _agent_service
+# Marker the LLM outputs to request a tool call (detected in the text stream)
+TOOL_CALL_OPEN = "<<TOOL_CALL:"
+TOOL_CALL_CLOSE = ">>"
 
 
 def _cache_key(question: str, business_account_id: str = "") -> str:
     """Stable cache key for a question (history-less queries only)."""
     raw = f"{business_account_id}:{question.lower().strip()}"
     return f"oversight:{hashlib.md5(raw.encode()).hexdigest()}"
+
+
+def _build_tool_descriptions() -> str:
+    """Build tool descriptions as plain text for prompt injection.
+
+    These are NOT bound via bind_tools() — the LLM sees them as readable reference
+    text and uses the <<TOOL_CALL:...>> marker syntax when it wants to invoke one.
+    This avoids LangChain's bind_tools() system prompt that stalls smaller models.
+    """
+    return """
+## AVAILABLE TOOLS (optional — use only if data is genuinely missing)
+If you need data that is NOT in the context above, output: <<TOOL_CALL:get_audit_log_entries|resource_id:ID,event_type:TYPE,date_from:YYYY-MM-DD,business_account_id:ID,limit:N>>
+If you need run statistics: <<TOOL_CALL:get_run_summary|run_id:RUN_UUID>>
+After outputting the marker, I will insert the tool results. Then provide your final answer.
+"""
+
+
+# ------------------------------------------------------------------
+# Tool call parsing and execution (inline, no AgentService needed)
+# ------------------------------------------------------------------
+
+def _parse_tool_calls(text: str) -> list[dict]:
+    """Extract <<TOOL_CALL:tool_name|args>> markers from LLM text output.
+
+    Args format inside markers: key1:value1,key2:value2
+    Values containing commas or special chars are NOT quoted — keep it simple.
+    """
+    pattern = re.escape(TOOL_CALL_OPEN) + r"([^|]+)\|([^" + re.escape(TOOL_CALL_CLOSE) + r"]+)" + re.escape(TOOL_CALL_CLOSE)
+    matches = re.findall(pattern, text)
+    calls = []
+    for tool_name_raw, args_raw in matches:
+        tool_name = tool_name_raw.strip()
+        args = {}
+        for pair in args_raw.split(","):
+            if ":" not in pair:
+                continue
+            k, v = pair.split(":", 1)
+            k = k.strip()
+            v = v.strip()
+            # Coerce numeric types
+            if v.lower() == "none" or v.lower() == "null" or v == "":
+                continue
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass  # keep as string
+            args[k] = v
+        calls.append({"name": tool_name, "args": args})
+    return calls
+
+
+async def _execute_oversight_tool(tool_name: str, args: dict) -> dict:
+    """Execute a single oversight tool by name, with timeout."""
+    from tools.oversight_tools import _get_audit_log_entries, _get_run_summary
+
+    TOOL_MAP = {
+        "get_audit_log_entries": _get_audit_log_entries,
+        "get_run_summary": _get_run_summary,
+    }
+
+    func = TOOL_MAP.get(tool_name)
+    if not func:
+        return {"error": f"unknown_tool", "message": f"Tool '{tool_name}' not found"}
+
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(func, **args),
+            timeout=TOOL_TIMEOUT_SECONDS,
+        )
+        logger.info(f"Oversight tool '{tool_name}' executed successfully")
+        TOOL_CALLS.labels(tool_name=tool_name).inc()
+        return result
+    except asyncio.TimeoutError:
+        logger.warning(f"Oversight tool '{tool_name}' timed out after {TOOL_TIMEOUT_SECONDS}s")
+        TOOL_CALLS.labels(tool_name=f"{tool_name}_timeout").inc()
+        return {"error": "timeout", "message": f"Tool '{tool_name}' timed out"}
+    except Exception as e:
+        logger.error(f"Oversight tool '{tool_name}' failed: {e}")
+        TOOL_CALLS.labels(tool_name=f"{tool_name}_error").inc()
+        return {"error": str(e)}
 
 
 async def _fetch_auto_context(business_account_id: str, limit: int = 12) -> str:
@@ -79,20 +164,8 @@ async def chat(
 ) -> dict:
     """Ask the Oversight Brain a question, returns explanation with sources.
 
-    Args:
-        question: User's natural language question
-        chat_history: Prior turns [{"role": "user"|"assistant", "content": "..."}]
-        user_id: For audit log (which dashboard user asked)
-        request_id: For request tracing
-
-    Returns:
-        {
-            "answer": str,
-            "sources": list,
-            "tools_used": list,
-            "latency_ms": int,
-            "request_id": str,
-        }
+    No bind_tools() — uses direct llm.invoke() with tool descriptions in prompt.
+    LLM optionally requests tools via <<TOOL_CALL:...>> text syntax.
     """
     start = time.time()
 
@@ -109,48 +182,85 @@ async def chat(
             logger.info(f"[{request_id}] Oversight Brain L2 cache hit")
             return {**l2, "request_id": request_id, "latency_ms": 0, "cached": True}
 
-    # --- Build prompt with conversation history and auto-context ---
+    # --- Build prompt ---
     history_text = ""
     if chat_history:
-        for msg in chat_history[-5:]:  # Last 5 turns only to stay within context limits
+        for msg in chat_history[-5:]:
             role = msg.get("role", "user").upper()
             content = msg.get("content", "")[:300]
             history_text += f"{role}: {content}\n"
 
-    # Auto-inject recent decisions as context
     from config import OVERSIGHT_AUTO_CONTEXT_LIMIT
     auto_context = await _fetch_auto_context(business_account_id, limit=OVERSIGHT_AUTO_CONTEXT_LIMIT)
 
     prompt = (
         "INSTRUCTION: You are in read-only explainability mode. "
-        "Answer from the injected context below. Do NOT call tools unless data is explicitly absent. "
-        "Make at most one tool call total.\n\n"
+        "Answer from the injected context below. Use tools only if specific data is genuinely absent.\n"
+        + _build_tool_descriptions()
+        + "\n\n"
         + PromptService.get("oversight_brain").format(
             input=f"{auto_context}\n\n{question}",
             chat_history=history_text or "(No prior conversation)",
         )
     )
 
-    # --- Single LLM entry point with timeout protection ---
+    # --- LLM call with semaphore + outer timeout ---
     from config import OVERSIGHT_LLM_TIMEOUT_SECONDS
+    tools_called = []
+    final_text = ""
+
     try:
-        result = await asyncio.wait_for(
-            _get_agent().analyze_async(prompt),
-            timeout=OVERSIGHT_LLM_TIMEOUT_SECONDS,
-        )
+        async with _llm_semaphore:
+            async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS):
+                raw_result = await asyncio.to_thread(llm.invoke, prompt)
+
     except asyncio.TimeoutError:
         logger.warning(f"[{request_id}] Oversight Brain LLM timed out after {OVERSIGHT_LLM_TIMEOUT_SECONDS}s")
-        result = {
-            "error": "timeout",
-            "message": f"LLM response timed out after {OVERSIGHT_LLM_TIMEOUT_SECONDS}s",
-        }
+        final_text = "I timed out while generating a response. Please try again."
+        raw_result = None
 
-    latency_ms = result.pop("_latency_ms", int((time.time() - start) * 1000))
-    tools_called = result.pop("_tools_called", [])
+    except Exception as e:
+        logger.error(f"[{request_id}] Oversight LLM invoke failed: {e}")
+        final_text = f"An error occurred: {e}"
+        raw_result = None
+
+    if raw_result:
+        raw_text = raw_result.content if hasattr(raw_result, "content") else str(raw_result)
+        # Remove any tool call markers from text before parsing
+        cleaned = re.sub(r"<<TOOL_CALL:[^>]+>>", "", raw_text)
+        final_text = cleaned.strip()
+
+        # Parse and execute any tool calls found in the text
+        calls = _parse_tool_calls(raw_text)
+        if calls:
+            for call in calls:
+                tool_result = await _execute_oversight_tool(call["name"], call["args"])
+                tools_called.append(call["name"])
+
+                # Second pass: inject tool result and ask for final answer
+                second_prompt = (
+                    f"{prompt}\n\n"
+                    f"[TOOL_RESULT for {call['name']}]:\n{json.dumps(tool_result, default=str, indent=2)}\n\n"
+                    "Using the tool result above, provide your final answer as JSON."
+                )
+                try:
+                    async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS):
+                        second_result = await asyncio.to_thread(llm.invoke, second_prompt)
+                    second_text = second_result.content if hasattr(second_result, "content") else str(second_result)
+                    # Clean tool markers from second pass too
+                    final_text = re.sub(r"<<TOOL_CALL:[^>]+>>", "", second_text).strip()
+                except Exception as e2:
+                    logger.warning(f"[{request_id}] Oversight second-pass failed: {e2}")
+                    # Use the cleaned first-pass text as fallback
+                    final_text = cleaned.strip()
+
+    # --- Parse JSON from LLM response ---
+    parsed = _parse_json_response_blocking(final_text)
+    latency_ms = int((time.time() - start) * 1000)
 
     response = {
-        "answer": result.get("answer", "I need more context from the database to answer that."),
-        "sources": result.get("sources", []),
+        "answer": parsed.get("answer", final_text or "I need more context from the database to answer that."),
+        "sources": parsed.get("sources", []),
         "tools_used": tools_called,
         "latency_ms": latency_ms,
         "request_id": request_id,
@@ -165,7 +275,7 @@ async def chat(
     # --- Audit every query ---
     SupabaseService.log_decision(
         event_type="oversight_chat_query",
-        action="error" if "error" in result else "answered",
+        action="error" if "error" in parsed else "answered",
         resource_type="oversight_query",
         resource_id=str(uuid_mod.uuid4()),
         user_id=user_id,
@@ -187,6 +297,38 @@ async def chat(
     return response
 
 
+def _parse_json_response_blocking(raw: str) -> dict:
+    """Parse JSON from LLM response text — handles raw, markdown, partial."""
+    import json as json_mod
+
+    cleaned = raw.strip()
+
+    # Direct parse
+    try:
+        return json_mod.loads(cleaned)
+    except json_mod.JSONDecodeError:
+        pass
+
+    # Markdown code block
+    code_block_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+    if code_block_match:
+        try:
+            return json_mod.loads(code_block_match.group(1))
+        except json_mod.JSONDecodeError:
+            pass
+
+    # First { ... } block
+    brace_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", cleaned, re.DOTALL)
+    if brace_match:
+        try:
+            return json_mod.loads(brace_match.group(0))
+        except json_mod.JSONDecodeError:
+            pass
+
+    logger.warning(f"Oversight: failed to parse JSON from response: {cleaned[:200]}...")
+    return {}  # Return empty dict — caller uses answer field as fallback
+
+
 async def astream_chat(
     question: str,
     business_account_id: str = "",
@@ -195,25 +337,15 @@ async def astream_chat(
     request_id: str = "unknown",
     request=None,  # FastAPI Request for disconnect detection
 ):
-    """Streaming version of chat() with Phase 1 hardening.
+    """Streaming version — direct llm.astream(), no bind_tools().
 
     Features:
-    - Event IDs for Last-Event-ID resume support
-    - Heartbeat pings every N seconds (prevents proxy timeouts)
-    - Disconnect detection (stops LLM on client disconnect)
-    - Tool status events (tool_call, tool_done)
-    - Proper SSE formatting (id:, event:, data: fields)
-
-    Architecture: both the LLM call and the heartbeat loop run as background
-    asyncio.Tasks that post events into a shared queue. The generator's main
-    body is purely a consumer — it blocks on queue.get() and yields whatever
-    arrives first (heartbeat ping or LLM token). This ensures bytes reach nginx
-    during the full duration of LLM inference, preventing proxy_read_timeout (504).
-
-    Args:
-        request: FastAPI Request object for disconnect detection
+    - Tool descriptions embedded in prompt as readable text
+    - Optional tool calls via <<TOOL_CALL:...>> text syntax
+    - Tool execution triggers "tool_status" SSE event (user sees "thinking...")
+    - Second-pass LLM stream delivers final answer after tool results injected
+    - Event IDs, heartbeat pings, disconnect detection — all preserved
     """
-    import json as json_mod
     from config import OVERSIGHT_AUTO_CONTEXT_LIMIT, OVERSIGHT_LLM_TIMEOUT_SECONDS, SSE_HEARTBEAT_INTERVAL_SECONDS
 
     start = time.time()
@@ -252,8 +384,9 @@ async def astream_chat(
 
     prompt = (
         "INSTRUCTION: You are in read-only explainability mode. "
-        "Answer from the injected context below. Do NOT call tools unless data is explicitly absent. "
-        "Make at most one tool call total.\n\n"
+        "Answer from the injected context below. Use tools only if specific data is genuinely absent.\n"
+        + _build_tool_descriptions()
+        + "\n\n"
         + PromptService.get("oversight_brain").format(
             input=f"{auto_context}\n\n{question}",
             chat_history=history_text or "(No prior conversation)",
@@ -266,28 +399,87 @@ async def astream_chat(
     # during inference. The generator sits at queue.get() and wakes immediately
     # on whichever event arrives first.
     event_queue: asyncio.Queue = asyncio.Queue()
-
-    async def on_tool_event(event: dict):
-        """Callback from agent_service for tool events."""
-        await event_queue.put(("tool_event", event))
+    tool_was_called = False
 
     async def run_llm():
-        """Background task: run LLM inference, post tokens/errors/done to queue."""
+        """Background task: run direct LLM stream, detect tool call markers, execute tools."""
+        nonlocal tool_was_called
         try:
-            agent = _get_agent()
-            async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS):
-                async for chunk in agent.astream_analyze(prompt, on_event=on_tool_event):
-                    await event_queue.put(("token", chunk))
-        except TimeoutError:
+            async with _llm_semaphore:
+                # First pass: stream tokens, detect tool call markers
+                buffer = ""
+                tool_call_detected = False
+                tool_call_full = ""  # accumulate the complete <<TOOL_CALL:...>> block
+
+                async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS):
+                    async for chunk in llm.astream(prompt):
+                        text = chunk.content if hasattr(chunk, "content") else ""
+                        if not text:
+                            continue
+
+                        # Track if we're inside a tool call marker
+                        if TOOL_CALL_OPEN in buffer or tool_call_detected:
+                            tool_call_detected = True
+                            tool_call_full += text
+                            buffer += text
+                            # Keep yielding text BEFORE the tool marker (preface)
+                            # We yield after the tool marker is complete
+                            if TOOL_CALL_CLOSE in tool_call_full:
+                                # Extract text before marker, yield that
+                                marker_start = tool_call_full.find(TOOL_CALL_OPEN)
+                                before_marker = tool_call_full[:marker_start]
+                                if before_marker:
+                                    accumulated_local = before_marker
+                                    await event_queue.put(("token", accumulated_local))
+                                break
+                        else:
+                            buffer += text
+                            await event_queue.put(("token", text))
+
+                # Check if a tool call was detected
+                if tool_call_detected and tool_call_full:
+                    # Parse tool call
+                    calls = _parse_tool_calls(tool_call_full)
+                    if calls:
+                        tool_was_called = True
+                        call = calls[0]  # handle one at a time
+                        logger.info(f"[{request_id}] Oversight LLM requested tool: {call['name']}")
+
+                        # Tell user tool is being called
+                        await event_queue.put(("tool_status", {
+                            "status": "calling",
+                            "tool_name": call["name"],
+                            "message": f"Fetching {call['name']} data...",
+                        }))
+
+                        # Execute tool
+                        tool_result = await _execute_oversight_tool(call["name"], call["args"])
+
+                        # Second pass: inject result, stream final answer
+                        second_prompt = (
+                            f"{prompt}\n\n"
+                            f"[TOOL_RESULT for {call['name']}]:\n{json_mod.dumps(tool_result, default=str, indent=2)}\n\n"
+                            "Using the tool result above, provide your final answer as JSON."
+                        )
+
+                        async with asyncio.timeout(OVERSIGHT_LLM_TIMEOUT_SECONDS):
+                            async for chunk in llm.astream(second_prompt):
+                                text = chunk.content if hasattr(chunk, "content") else ""
+                                if text:
+                                    # Clean any residual tool markers
+                                    cleaned = re.sub(r"<<TOOL_CALL:[^>]+>>", "", text)
+                                    if cleaned:
+                                        await event_queue.put(("token", cleaned))
+
+        except asyncio.TimeoutError:
             logger.warning(f"[{request_id}] Oversight stream timed out after {OVERSIGHT_LLM_TIMEOUT_SECONDS}s")
-            await event_queue.put(("error", {"error": "timeout"}))
+            await event_queue.put(("error", {"error": "timeout", "message": "LLM timed out"}))
         except asyncio.CancelledError:
-            pass  # cancelled by generator on client disconnect — expected
+            pass
         except Exception as e:
             logger.error(f"[{request_id}] Oversight stream error: {e}")
             await event_queue.put(("error", {"error": "stream_failed", "message": str(e)}))
         finally:
-            # Always signal end so the generator's queue.get() loop can exit
             await event_queue.put(("stream_done", None))
 
     async def heartbeat_loop():
@@ -310,8 +502,6 @@ async def astream_chat(
     heartbeat_task = asyncio.create_task(heartbeat_loop())
 
     try:
-        # Generator main loop: consume queue, yield immediately on each event.
-        # Heartbeats and tokens are interleaved naturally — no event waits for another.
         while True:
             try:
                 event_type, event_data = await asyncio.wait_for(
@@ -331,8 +521,8 @@ async def astream_chat(
             if event_type == "heartbeat":
                 yield format_sse_event({"heartbeat": True}, event_type="ping")
 
-            elif event_type == "tool_event":
-                yield format_sse_event(event_data, event_type=event_data.get("event_type", "tool_status"))
+            elif event_type == "tool_status":
+                yield format_sse_event(event_data, event_type="tool_status")
 
             elif event_type == "token":
                 accumulated += event_data
@@ -346,7 +536,6 @@ async def astream_chat(
                 break
 
     finally:
-        # Always clean up both tasks regardless of how the loop exited
         heartbeat_task.cancel()
         try:
             await heartbeat_task
@@ -382,6 +571,7 @@ async def astream_chat(
             "request_id": request_id,
             "streamed": True,
             "events_sent": event_id,
+            "tool_called": tool_was_called,
         },
     )
 
