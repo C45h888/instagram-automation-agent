@@ -21,7 +21,6 @@ import re
 import time
 
 from config import llm, logger
-from tools import ALL_TOOLS
 from prompts import SYSTEM_PROMPT
 from metrics import TOOL_CALLS, LLM_ERRORS
 
@@ -32,17 +31,84 @@ _llm_semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM)
 # Per-tool timeout in seconds
 TOOL_TIMEOUT_SECONDS = 5.0
 
+# ================================
+# Scoped Tool Sets
+# ================================
+# Import individual tools directly (not from tools/__init__.py which only has lists).
+# This avoids circular import issues since automation_tools._get_agent_service()
+# is a lazy import inside the function body, not at module load time.
+from tools.supabase_tools import (
+    get_post_context_tool,
+    get_account_info_tool,
+    get_recent_comments_tool,
+    get_dm_history_tool,
+    get_dm_conversation_context_tool,
+    get_post_performance_tool,
+    log_decision_tool,
+)
+from tools.automation_tools import (
+    analyze_message_tool,
+    reply_to_comment_tool,
+    reply_to_dm_tool,
+)
+
+ENGAGEMENT_SCOPE_TOOLS = [
+    # Supabase read tools needed for engagement analysis
+    get_post_context_tool,
+    get_account_info_tool,
+    get_recent_comments_tool,
+    log_decision_tool,
+    # Automation execution tools
+    analyze_message_tool,
+    reply_to_comment_tool,
+    reply_to_dm_tool,
+]
+
+CONTENT_SCOPE_TOOLS = [
+    get_post_context_tool,
+    get_account_info_tool,
+    get_post_performance_tool,
+    log_decision_tool,
+]
+
+ATTRIBUTION_SCOPE_TOOLS = [
+    get_dm_history_tool,
+    get_account_info_tool,
+    log_decision_tool,
+]
+
+SCOPED_TOOLS = {
+    "engagement": ENGAGEMENT_SCOPE_TOOLS,
+    "content": CONTENT_SCOPE_TOOLS,
+    "attribution": ATTRIBUTION_SCOPE_TOOLS,
+}
+
 
 class AgentService:
-    """Invoke LLM with bound tools for context-aware analysis and automation."""
+    """Invoke LLM with bound tools for context-aware analysis and automation.
 
-    def __init__(self, tools=None):
-        tool_list = tools if tools is not None else ALL_TOOLS
+    Args:
+        scope: One of "engagement", "content", "attribution". Takes precedence
+               over the tools parameter if both are provided.
+        tools: Explicit list of tools to bind. Used when scope is None.
+               Defaults to all tools if neither scope nor tools is provided.
+    """
+
+    def __init__(self, scope: str = None, tools: list = None):
+        if scope is not None and scope in SCOPED_TOOLS:
+            tool_list = SCOPED_TOOLS[scope]
+        elif tools is not None:
+            tool_list = tools
+        else:
+            # Backward compatibility: default to ALL_TOOLS
+            from tools import ALL_TOOLS
+            tool_list = ALL_TOOLS
+
         self.llm_with_tools = llm.bind_tools(tool_list)
         self._tool_map = {t.name: t for t in tool_list}
+        self._scope = scope
         logger.info(
-            f"AgentService initialized with {len(tool_list)} tools "
-            f"(max_concurrent={MAX_CONCURRENT_LLM}, tool_timeout={TOOL_TIMEOUT_SECONDS}s): "
+            f"AgentService initialized (scope={scope or 'none'}, tools={len(tool_list)}): "
             f"{list(self._tool_map.keys())}"
         )
 

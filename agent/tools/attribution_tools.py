@@ -33,7 +33,7 @@ def _get_agent_service():
     global _agent_service
     if _agent_service is None:
         from services.agent_service import AgentService
-        _agent_service = AgentService()
+        _agent_service = AgentService(scope="attribution")
     return _agent_service
 
 

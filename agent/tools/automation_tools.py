@@ -65,7 +65,7 @@ def _get_agent_service():
     global _agent_service
     if _agent_service is None:
         from services.agent_service import AgentService
-        _agent_service = AgentService()
+        _agent_service = AgentService(scope="engagement")
     return _agent_service
 
 
@@ -114,19 +114,29 @@ def _analyze_message(
         customer_value=customer_lifetime_value,
     )
 
-    # Use agent service for LLM call
-    agent = _get_agent_service()
+    # Invoke LLM directly without bind_tools — the analyze_message prompt
+    # returns structured JSON and never triggers tool calls.
+    # This eliminates the nested AgentService(ALL_TOOLS) anti-pattern.
+    from config import llm
+    from prompts import SYSTEM_PROMPT
 
-    # Run async call in sync context
+    full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+
     try:
         loop = asyncio.get_running_loop()
-        # If we're already in an async context, use run_coroutine_threadsafe
-        import concurrent.futures
-        future = asyncio.run_coroutine_threadsafe(agent.analyze_async(prompt), loop)
-        result = future.result(timeout=30)
+        future = asyncio.run_coroutine_threadsafe(
+            asyncio.to_thread(llm.invoke, full_prompt), loop
+        )
+        raw_response = future.result(timeout=30)
     except RuntimeError:
-        # No running loop, create a new one
-        result = asyncio.run(agent.analyze_async(prompt))
+        # No running loop — use asyncio.to_thread directly
+        raw_response = asyncio.run(asyncio.to_thread(llm.invoke, full_prompt))
+
+    # Parse JSON response using the static method (lazy import to avoid circular)
+    from services.agent_service import AgentService
+    result = AgentService._parse_json_response(
+        raw_response.content if hasattr(raw_response, "content") else str(raw_response)
+    )
 
     # Apply hard escalation rules on top of LLM decision
     result = _apply_hard_escalation_rules(result, message_text, customer_lifetime_value)
