@@ -1,9 +1,9 @@
 #!/bin/bash
-# Pull Nemotron Orchestrator 8B GGUF from HuggingFace into Ollama with retry on failure
+# Pull Llama 3.1 8B Instruct from Ollama registry with retry on failure
 # This script runs inside the ollama container or as an init step
 
-# HuggingFace GGUF via Ollama's hf.co connector —Nemotron Orchestrator supports tool calling
-MODEL="hf.co/MaziyarPanahi/Nemotron-Orchestrator-8B-GGUF:Q4_K_M"
+# Ollama registry — Llama 3.1 8B has official tool-calling support
+MODEL="llama3.1:8b"
 
 # Skip pull if model is already present (avoids unnecessary network check on restarts)
 if ollama list 2>/dev/null | grep -q "$MODEL"; then
