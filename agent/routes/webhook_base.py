@@ -153,7 +153,7 @@ async def webhook_pipeline(raw_payload: dict, body: bytes, request: Request, con
 
     # Import tool function directly to avoid circular imports
     from tools.automation_tools import _analyze_message
-    analysis_result = _analyze_message(**analysis_input)
+    analysis_result = await _analyze_message(**analysis_input)
 
     if "error" in analysis_result and analysis_result.get("error") != "json_parse_failed":
         logger.error(f"[{request_id}] Analysis failed: {analysis_result}")

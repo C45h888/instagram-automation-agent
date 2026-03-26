@@ -232,11 +232,11 @@ async def generate_and_evaluate(
     )
 
     try:
-        # Direct LLM call — no bind_tools(), no scoped tool binding.
-        # The prompt has all context pre-injected; the model just outputs JSON.
-        raw_response = await asyncio.to_thread(llm.invoke, prompt)
-        from services.agent_service import AgentService
-        result = AgentService._parse_json_response(
+        # Invoke LLM via LLMService — retry + backoff + error classification.
+        # No bind_tools() — the prompt has all context pre-injected.
+        raw_response = await LLMService.invoke(prompt)
+        from services.llm_service import LLMService
+        result = LLMService._parse_json_response(
             raw_response.content if hasattr(raw_response, "content") else str(raw_response)
         )
     except Exception as e:

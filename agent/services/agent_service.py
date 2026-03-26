@@ -17,12 +17,13 @@ The tools and prompts are already compatible.
 import asyncio
 import json
 import os
-import re
+import random
 import time
 
 from config import llm, logger
 from prompts import SYSTEM_PROMPT
 from metrics import TOOL_CALLS, LLM_ERRORS
+from services.llm_service import LLMService
 
 # Configurable max concurrent LLM inferences (protects Ollama CPU)
 MAX_CONCURRENT_LLM = int(os.getenv("MAX_CONCURRENT_LLM", "4"))
@@ -35,8 +36,8 @@ TOOL_TIMEOUT_SECONDS = 5.0
 # Scoped Tool Sets
 # ================================
 # Import individual tools directly (not from tools/__init__.py which only has lists).
-# This avoids circular import issues since automation_tools._get_agent_service()
-# is a lazy import inside the function body, not at module load time.
+# This avoids circular import issues — automation_tools now routes through LLMService
+# directly (no AgentService dependency), and supabase_tools uses lazy imports.
 from tools.supabase_tools import (
     get_post_context_tool,
     get_account_info_tool,
@@ -140,9 +141,9 @@ class AgentService:
         """Async LLM invocation with parallel tool execution.
 
         Flow:
-          1. Send prompt to LLM with tools bound (sync invoke in thread)
+          1. Send prompt to LLM with tools bound (retry via LLMService.invoke)
           2. If LLM requests tool calls, execute them in parallel
-          3. If tools were called, do follow-up invoke with results
+          3. If tools were called, do follow-up invoke with results (retry via LLMService.invoke)
           4. Parse final response as JSON
 
         Returns dict with parsed result or error info.
@@ -153,8 +154,8 @@ class AgentService:
             # Prepend system prompt for consistent behavior
             full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
 
-            # Step 1: Invoke LLM with tools (sync wrapped in thread)
-            result = await asyncio.to_thread(self.llm_with_tools.invoke, full_prompt)
+            # Step 1: Invoke LLM with tools (retry via LLMService.invoke)
+            result = await LLMService.invoke(full_prompt, llm_instance=self.llm_with_tools)
             tool_calls = getattr(result, "tool_calls", [])
 
             # Step 2: Execute tool calls in parallel if any
@@ -162,10 +163,10 @@ class AgentService:
             if tool_calls:
                 tool_outputs = await self._execute_tool_calls_async(tool_calls)
 
-                # If tools were called, do a follow-up invoke with tool results as context
+                # If tools were called, do a follow-up invoke with tool results as context (retry via LLMService.invoke)
                 if tool_outputs:
                     enriched_prompt = self._build_enriched_prompt(full_prompt, tool_outputs)
-                    result = await asyncio.to_thread(self.llm_with_tools.invoke, enriched_prompt)
+                    result = await LLMService.invoke(enriched_prompt, llm_instance=self.llm_with_tools)
 
             latency_ms = int((time.time() - start_time) * 1000)
 
@@ -188,11 +189,11 @@ class AgentService:
             }
 
     async def _astream(self, prompt: str, on_event=None):
-        """Async streaming LLM invocation with tool support.
+        """Async streaming LLM invocation with tool support and retry.
 
         Flow:
           1. Stream first pass — yields tokens to caller in real time while accumulating
-             chunks for tool call detection. No blocking invoke.
+             chunks for tool call detection. Retries on transient failures.
           2. If tool calls detected in accumulated result: execute tools, stream second
              pass with enriched context. Tool outputs injected via _build_enriched_prompt.
           3. If no tool calls: stream is already complete, response delivered in step 1.
@@ -200,28 +201,69 @@ class AgentService:
         Path A (no tools): single streaming pass, first token arrives immediately.
         Path B (tools needed): first pass accumulates tool call JSON (no text tokens),
         tools execute, second streaming pass delivers the final answer.
+
+        Retry: Streaming retry restarts the entire pass from the beginning. This is
+        acceptable because we can't buffer mid-stream — client may have received partial
+        tokens from the failed pass, but the retry delivers fresh tokens from start.
         """
         start_time = time.time()
+        full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
 
-        try:
-            full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+        # ─── Streaming pass helper with retry ─────────────────────────────────
+        async def _stream_pass(prompt_text: str, pass_label: str):
+            """Stream a single pass with exponential-backoff retry.
 
-            # Step 1: Stream first pass — deliver tokens in real time and accumulate
-            # chunks so tool_calls can be inspected after the stream completes.
+            Yields text chunks to the outer caller in real time.
+            Returns the accumulated AIMessageChunk so the caller can read tool_calls.
+            """
             accumulated = None
-            async for chunk in self.llm_with_tools.astream(full_prompt):
-                text = chunk.content if hasattr(chunk, "content") else ""
-                if text:
-                    yield text
-                accumulated = chunk if accumulated is None else accumulated + chunk
 
+            for attempt in range(LLMService.DEFAULT_MAX_RETRIES):
+                try:
+                    async for chunk in self.llm_with_tools.astream(prompt_text):
+                        text = chunk.content if hasattr(chunk, "content") else ""
+                        if text:
+                            yield text
+                        accumulated = chunk if accumulated is None else accumulated + chunk
+                    break  # success — exit retry loop
+
+                except Exception as e:
+                    if not LLMService._is_retryable(e):
+                        logger.error(f"[_astream] {pass_label} failed (non-retryable): {e}")
+                        raise
+
+                    if attempt == LLMService.DEFAULT_MAX_RETRIES - 1:
+                        logger.error(
+                            f"[_astream] {pass_label} exhausted {LLMService.DEFAULT_MAX_RETRIES} attempts: {e}"
+                        )
+                        raise
+
+                    delay = (
+                        LLMService.DEFAULT_BASE_DELAY * (2 ** attempt)
+                        + random.uniform(0, LLMService.JITTER_RANGE)
+                    )
+                    logger.warning(
+                        f"[_astream] {pass_label} failed (attempt {attempt + 1}/"
+                        f"{LLMService.DEFAULT_MAX_RETRIES}), retrying in {delay:.1f}s: {e}"
+                    )
+                    await asyncio.sleep(delay)
+                    accumulated = None  # reset — stream restarts from beginning
+
+            # Return accumulated so caller can read tool_calls
+            return accumulated
+
+        # ─── Pass 1 ────────────────────────────────────────────────────────────
+        try:
+            accumulated = await _stream_pass(full_prompt, "pass-1")
             tool_calls = getattr(accumulated, "tool_calls", []) if accumulated else []
 
-            # Step 2: Execute tool calls if the model requested them
+            # ─── Tool execution ───────────────────────────────────────────────
             tool_outputs = {}
             if tool_calls:
                 for call in tool_calls:
-                    tool_name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+                    tool_name = (
+                        call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+                    )
                     if on_event:
                         await on_event({"event_type": "tool_call", "tool_name": tool_name})
 
@@ -230,17 +272,18 @@ class AgentService:
                 tool_elapsed_ms = int((time.time() - tool_start) * 1000)
 
                 for call in tool_calls:
-                    tool_name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+                    tool_name = (
+                        call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+                    )
                     if on_event:
-                        await on_event({"event_type": "tool_done", "tool_name": tool_name, "elapsed_ms": tool_elapsed_ms})
+                        await on_event(
+                            {"event_type": "tool_done", "tool_name": tool_name, "elapsed_ms": tool_elapsed_ms}
+                        )
 
-                # Stream second pass with tool results injected into context
+                # ─── Pass 2 ─────────────────────────────────────────────────
                 if tool_outputs:
                     enriched_prompt = self._build_enriched_prompt(full_prompt, tool_outputs)
-                    async for chunk in self.llm_with_tools.astream(enriched_prompt):
-                        text = chunk.content if hasattr(chunk, "content") else str(chunk)
-                        if text:
-                            yield text
+                    await _stream_pass(enriched_prompt, "pass-2")
 
         except Exception as e:
             latency_ms = int((time.time() - start_time) * 1000)
@@ -313,36 +356,8 @@ class AgentService:
 
     @staticmethod
     def _parse_json_response(raw: str) -> dict:
-        """Parse JSON from LLM response. Same logic as LLMService for consistency."""
-        cleaned = raw.strip()
-
-        # Direct parse
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
-
-        # Markdown code block
-        code_block_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
-        if code_block_match:
-            try:
-                return json.loads(code_block_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # First { ... } block
-        brace_match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", cleaned, re.DOTALL)
-        if brace_match:
-            try:
-                return json.loads(brace_match.group(0))
-            except json.JSONDecodeError:
-                pass
-
-        logger.warning(f"Failed to parse agent response as JSON: {cleaned[:200]}...")
-        return {
-            "error": "json_parse_failed",
-            "raw_response": cleaned[:500],
-        }
+        """Parse JSON from LLM response. Delegates to LLMService._parse_json_response."""
+        return LLMService._parse_json_response(raw)
 
     # Backward compatibility: sync wrapper for tests
     def analyze(self, prompt: str) -> dict:

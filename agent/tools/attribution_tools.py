@@ -444,11 +444,11 @@ async def evaluate_attribution(
     )
 
     try:
-        # Direct LLM call — no bind_tools(), no scoped tool binding.
+        # Invoke LLM via LLMService — retry + backoff + error classification.
         # The prompt has all attribution data pre-injected; the model just validates and outputs JSON.
-        raw_response = await asyncio.to_thread(llm.invoke, prompt)
-        from services.agent_service import AgentService
-        result = AgentService._parse_json_response(
+        raw_response = await LLMService.invoke(prompt)
+        from services.llm_service import LLMService
+        result = LLMService._parse_json_response(
             raw_response.content if hasattr(raw_response, "content") else str(raw_response)
         )
     except Exception as e:

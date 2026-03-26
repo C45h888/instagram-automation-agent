@@ -10,7 +10,6 @@ Tools:
   - reply_to_dm: Execute DM reply via backend proxy
 """
 
-import asyncio
 import uuid as _uuid
 from datetime import datetime, timezone
 from langchain_core.tools import StructuredTool
@@ -55,24 +54,9 @@ class ReplyToDMInput(BaseModel):
 
 
 # ================================
-# Singleton Agent Service (lazy import to avoid circular)
-# ================================
-_agent_service = None
-
-
-def _get_agent_service():
-    """Lazy import to avoid circular dependency."""
-    global _agent_service
-    if _agent_service is None:
-        from services.agent_service import AgentService
-        _agent_service = AgentService(scope="engagement")
-    return _agent_service
-
-
-# ================================
 # analyze_message Implementation
 # ================================
-def _analyze_message(
+async def _analyze_message(
     message_text: str,
     message_type: str,
     sender_username: str,
@@ -114,23 +98,14 @@ def _analyze_message(
         customer_value=customer_lifetime_value,
     )
 
-    # Invoke LLM directly without bind_tools — the analyze_message prompt
-    # returns structured JSON and never triggers tool calls.
-    # This eliminates the nested AgentService(ALL_TOOLS) anti-pattern.
+    # Invoke LLM via LLMService for retry/backoff coverage.
+    # No bind_tools() needed — analyze_message prompt returns structured JSON and never triggers tool calls.
+    from services.llm_service import LLMService
     from config import llm
     from prompts import SYSTEM_PROMPT
 
     full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
-
-    try:
-        loop = asyncio.get_running_loop()
-        future = asyncio.run_coroutine_threadsafe(
-            asyncio.to_thread(llm.invoke, full_prompt), loop
-        )
-        raw_response = future.result(timeout=30)
-    except RuntimeError:
-        # No running loop — use asyncio.to_thread directly
-        raw_response = asyncio.run(asyncio.to_thread(llm.invoke, full_prompt))
+    raw_response = await LLMService.invoke(full_prompt, llm_instance=llm)
 
     # Parse JSON response using the static method (lazy import to avoid circular)
     from services.agent_service import AgentService

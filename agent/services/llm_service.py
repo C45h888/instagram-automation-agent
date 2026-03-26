@@ -1,4 +1,6 @@
+import asyncio
 import json
+import random
 import re
 import time
 import requests
@@ -8,13 +10,77 @@ from config import llm, OLLAMA_HOST, logger
 class LLMService:
     """Wraps LangChain/Ollama interactions with safe JSON parsing and retry."""
 
+    DEFAULT_MAX_RETRIES = 3
+    DEFAULT_BASE_DELAY = 1.0  # seconds
+    JITTER_RANGE = 0.5        # seconds added to each backoff step
+
+    # ─────────────────────────────────────────────
+    # Core async invoke with exponential backoff
+    # ─────────────────────────────────────────────
+
+    @classmethod
+    async def invoke(
+        cls,
+        prompt: str,
+        llm_instance=None,
+        *,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        base_delay: float = DEFAULT_BASE_DELAY,
+    ):
+        """Invoke LLM with exponential backoff retry.
+
+        Args:
+            prompt: The prompt to send.
+            llm_instance: Which LLM to call. Defaults to base llm from config.
+                         Pass a tool-bound llm_with_tools variant for scoped calls.
+            max_retries: Maximum retry attempts (default 3).
+            base_delay: Initial backoff delay in seconds (default 1.0).
+
+        Returns:
+            AIMessage response from the LLM.
+
+        Raises:
+            The final exception after all retries are exhausted.
+        """
+        if llm_instance is None:
+            llm_instance = llm
+
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                return await asyncio.to_thread(llm_instance.invoke, prompt)
+
+            except Exception as e:
+                last_error = e
+
+                if not cls._is_retryable(e):
+                    logger.error(f"LLM invoke failed (non-retryable): {e}")
+                    raise
+
+                if attempt == max_retries - 1:
+                    logger.error(
+                        f"LLM invoke exhausted {max_retries} attempts: {e}"
+                    )
+                    raise
+
+                delay = (base_delay * (2 ** attempt)) + random.uniform(0, cls.JITTER_RANGE)
+                logger.warning(
+                    f"LLM invoke failed (attempt {attempt + 1}/{max_retries}), "
+                    f"retrying in {delay:.1f}s: {e}"
+                )
+                await asyncio.sleep(delay)
+
+        # Satisfies type checker — should never reach here
+        raise last_error
+
+    # ─────────────────────────────────────────────
+    # Deprecated: old sync analyze() — do not use
+    # ─────────────────────────────────────────────
+
     @staticmethod
     def analyze(prompt: str, retry: bool = True) -> dict:
-        """Invoke Nemotron via Ollama and parse JSON response.
-
-        Returns dict with parsed result or error info.
-        Retries once on failure if retry=True.
-        """
+        """DEPRECATED — use invoke() instead. Synchronous, 1x instant retry."""
         start_time = time.time()
 
         try:
@@ -90,3 +156,32 @@ class LLMService:
             return {"available": False, "reason": f"Status {resp.status_code}"}
         except Exception as e:
             return {"available": False, "reason": str(e)}
+
+    # ─────────────────────────────────────────────
+    # Internal helpers
+    # ─────────────────────────────────────────────
+
+    @staticmethod
+    def _is_retryable(error: Exception) -> bool:
+        """Return True if this error is transient and retry might help.
+
+        Only retry infrastructure/network errors — not logic errors
+        (JSON parse, validation, bad prompts).
+        """
+        msg = str(error).lower()
+        retryable = [
+            "connection",
+            "timeout",
+            "unavailable",
+            "busy",
+            "500",
+            "503",
+            "429",
+            "rate limit",
+            "model loading",
+            "econnreset",
+            "eof",
+            "broken pipe",
+            "network",
+        ]
+        return any(kw in msg for kw in retryable)

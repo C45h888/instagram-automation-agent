@@ -214,8 +214,7 @@ async def _process_message(run_id: str, msg: dict, account: dict) -> dict:
     # Fetch prior conversation history for LLM context
     dm_history = SupabaseService.get_dm_history(customer_ig_id, account.get("id", ""))
 
-    analysis = await asyncio.to_thread(
-        _analyze_message,
+    analysis = await _analyze_message(
         message_text=message_text,
         message_type="dm",
         sender_username=sender_username,

@@ -212,8 +212,7 @@ async def _process_comment(run_id: str, comment: dict, account: dict) -> dict:
     post_ctx = SupabaseService.get_post_context_by_uuid(media_id)
 
     # 2. Analyze via existing _analyze_message (runs LLM + hard escalation rules)
-    analysis = await asyncio.to_thread(
-        _analyze_message,
+    analysis = await _analyze_message(
         message_text=comment_text,
         message_type="comment",
         sender_username=author,
