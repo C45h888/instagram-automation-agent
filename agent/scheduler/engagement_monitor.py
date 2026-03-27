@@ -46,7 +46,7 @@ from services.supabase_service import SupabaseService
 from scheduler.dedup_service import DedupService
 from services.agent_service import AgentService
 from services.prompt_service import PromptService
-from tools.automation_tools import _apply_hard_escalation_rules, _reply_to_comment
+from tools.automation_tools import _apply_hard_escalation_rules, _enqueue_comment, _enqueue_from_job_payload
 
 
 # ================================
@@ -307,10 +307,16 @@ def _handle_escalation(run_id: str, comment: dict, account: dict, analysis: dict
 def _handle_auto_reply(
     run_id: str, comment: dict, account: dict, analysis: dict
 ) -> dict:
-    """Execute reply, log outcome, mark processed."""
+    """Execute reply: LLM confirmed via reply_to_comment_tool, Python enqueues here.
+
+    LLM's JSON contains reply_executed=true and reply_job_payload when it called
+    the reply_to_comment tool. Python uses the job_payload to enqueue via OutboundQueue.
+
+    If LLM did not call the tool (reply_job_payload is null) but set suggested_reply,
+    Python falls back to enqueueing directly from the suggested_reply text.
+    """
     comment_id = comment.get("id", "")
     instagram_comment_id = comment.get("instagram_comment_id", "")
-    suggested_reply = analysis.get("suggested_reply", "")
     account_id = account.get("id", "")
 
     # Get Instagram media ID from the comment's media_id (Supabase UUID)
@@ -320,17 +326,30 @@ def _handle_auto_reply(
         post_ctx = SupabaseService.get_post_context_by_uuid(media_uuid)
         instagram_media_id = post_ctx.get("instagram_media_id", "") if post_ctx else ""
 
-    # Execute reply via existing tool (backend proxy with retry)
-    result = _reply_to_comment(
-        comment_id=instagram_comment_id,
-        reply_text=suggested_reply,
-        business_account_id=account_id,
-        post_id=instagram_media_id,
-    )
+    # LLM confirmed reply via reply_to_comment_tool — use its validated job payload
+    reply_job_payload = analysis.get("reply_job_payload")
+    suggested_reply = analysis.get("suggested_reply", "")
+
+    if reply_job_payload:
+        # LLM called reply_to_comment_tool and it validated — use its job payload
+        result = _enqueue_from_job_payload(reply_job_payload)
+        # Override suggested_reply with what LLM confirmed via tool call
+        suggested_reply = reply_job_payload.get("payload", {}).get("reply_text", suggested_reply)
+        llm_tool_used = True
+    else:
+        # Fallback: LLM didn't call the tool but set suggested_reply in JSON
+        # Python enqueues directly from the suggested_reply text
+        result = _enqueue_comment(
+            comment_id=instagram_comment_id,
+            reply_text=suggested_reply,
+            business_account_id=account_id,
+            post_id=instagram_media_id,
+        )
+        llm_tool_used = False
 
     was_replied = result.get("success", False)
 
-    # Mark processed in DB
+    # Mark processed in DB — response_text is the LLM-generated reply
     SupabaseService.mark_comment_processed(
         comment_id,
         response_text=suggested_reply if was_replied else None,
@@ -359,13 +378,14 @@ def _handle_auto_reply(
             "confidence": analysis.get("confidence"),
             "suggested_reply": suggested_reply,
             "reply_sent": was_replied,
+            "llm_tool_used": llm_tool_used,  # Did LLM call reply_to_comment_tool?
             "execution_id": result.get("execution_id"),
             "error": result.get("error") if not was_replied else None,
         },
     )
 
     if was_replied:
-        logger.info(f"[{run_id}] Auto-replied to comment {comment_id}")
+        logger.info(f"[{run_id}] Auto-replied to comment {comment_id} (llm_tool={llm_tool_used})")
     else:
         logger.warning(f"[{run_id}] Reply failed for comment {comment_id}: {result.get('error')}")
 

@@ -298,7 +298,18 @@ TOOL PURPOSE — call these to fetch context BEFORE responding:
 - get_dm_history(business_account_id: string, customer_instagram_id: string, limit: int) → "Fetches prior DM messages with this sender. Use when analyzing a DM or need conversation history."
 - get_dm_conversation_context(business_account_id: string, customer_instagram_id: string) → "Fetches 24-hour reply window status. Check this before suggesting a DM reply."
 
-TASK: Analyze the message below. Fetch context using tools first if you don't have it in your knowledge. Then output your analysis as JSON.
+REPLY TOOLS — call these when you decide to auto-reply (after classifying the message):
+- reply_to_comment(comment_id: string, reply_text: string, business_account_id: string, post_id: string) → "Validates and prepares a comment reply. Returns {validated: true, job_payload: {...}} on success, {validated: false, error: '...'} on failure. Python enqueues after you confirm in JSON. Max 2200 chars."
+- reply_to_dm(conversation_id: string, recipient_id: string, message_text: string, business_account_id: string) → "Validates and prepares a DM reply. Returns {validated: true, job_payload: {...}} on success, {validated: false, error: '...'} on failure. Python enqueues after you confirm in JSON. Max 150 chars."
+
+WHEN TO USE REPLY TOOLS:
+1. After you classify the message and decide needs_human=false
+2. Call the appropriate reply tool with the reply text you generated
+3. If validated=true: include "reply_executed": true and the reply text in your JSON output
+4. If validated=false: set needs_human=true and explain the validation error
+5. If you choose not to reply (e.g., praise with no reply needed): set reply_executed=false in JSON
+
+TASK: Analyze the message below. Fetch context using tools first if you don't have it in your knowledge. Decide if escalation is needed. If not, generate a reply and call the appropriate reply tool. Then output your analysis as JSON.
 
 MESSAGE:
 Type: {message_type}
@@ -312,6 +323,7 @@ ANALYSIS INSTRUCTIONS — apply ALL of these:
 4. Identify intent in one phrase
 5. Confidence: 0.0–1.0
 6. Escalation decision — set needs_human first, then suggested_reply:
+7. Reply decision — if needs_human=false and you generated a reply, call the reply tool, then confirm in JSON with reply_executed=true
 
 ESCALATION RULES (apply IN ORDER):
 - If message contains any of: refund, cancel, broken, emergency, urgent, help, asap, lawsuit → needs_human=true, escalation_reason="urgent keyword detected"
@@ -328,24 +340,32 @@ REPLY GUIDELINES (only when needs_human=false):
 
 FEW-SHOT EXAMPLES:
 
-Example 1 — auto-reply:
+Example 1 — auto-reply (LLM called reply tool):
 Input: "What size should I get? I'm usually a medium"
-{{"category": "sizing", "sentiment": "neutral", "priority": "medium", "intent": "sizing inquiry", "confidence": 0.88, "needs_human": false, "escalation_reason": null, "suggested_reply": "Hi! Our sizing runs true to fit — Medium should work great! Check our size guide in bio for exact measurements 📏"}}
+You called: reply_to_comment(comment_id="123", reply_text="Hi! Our sizing runs true to fit — Medium should work great! Check our size guide in bio for exact measurements 📏", ...)
+Tool returned: {validated: true, job_payload: {...}}
+{{"category": "sizing", "sentiment": "neutral", "priority": "medium", "intent": "sizing inquiry", "confidence": 0.88, "needs_human": false, "escalation_reason": null, "suggested_reply": "Hi! Our sizing runs true to fit — Medium should work great! Check our size guide in bio for exact measurements 📏", "reply_executed": true, "reply_job_payload": {"job_id": "...", "action_type": "reply_comment", ...}}}
 
 Example 2 — escalate:
 Input: "This is terrible! Order arrived damaged and no one is responding. I want a refund NOW"
-{{"category": "complaint", "sentiment": "negative", "priority": "urgent", "intent": "damaged order complaint", "confidence": 0.95, "needs_human": true, "escalation_reason": "negative complaint with refund demand requires human empathy", "suggested_reply": null}}
+{{"category": "complaint", "sentiment": "negative", "priority": "urgent", "intent": "damaged order complaint", "confidence": 0.95, "needs_human": true, "escalation_reason": "negative complaint with refund demand requires human empathy", "suggested_reply": null, "reply_executed": false, "reply_job_payload": null}}
 
-Example 3 — auto-reply praise:
+Example 3 — auto-reply praise (LLM called reply tool):
 Input: "Love my new dress! Best purchase ever!!"
-{{"category": "praise", "sentiment": "positive", "priority": "low", "intent": "praise", "confidence": 0.92, "needs_human": false, "escalation_reason": null, "suggested_reply": "Thank you so much! We're thrilled you love it! 💕 Tag us in your photos — we'd love to feature you!"}}
+You called: reply_to_comment(comment_id="456", reply_text="Thank you so much! We're thrilled you love it! 💕 Tag us in your photos — we'd love to feature you!", ...)
+{{"category": "praise", "sentiment": "positive", "priority": "low", "intent": "praise", "confidence": 0.92, "needs_human": false, "escalation_reason": null, "suggested_reply": "Thank you so much! We're thrilled you love it! 💕 Tag us in your photos — we'd love to feature you!", "reply_executed": true, "reply_job_payload": {"job_id": "...", "action_type": "reply_comment", ...}}}
 
 Example 4 — escalate (complex message):
 Input: "Hi, I ordered 2 of these in different colors last week, one arrived damaged and the other was the wrong size. Can I get a refund for both? I've attached photos."
-{{"category": "returns", "sentiment": "negative", "priority": "high", "intent": "damaged + wrong size refund request", "confidence": 0.90, "needs_human": true, "escalation_reason": "complex multi-part question", "suggested_reply": null}}
+{{"category": "returns", "sentiment": "negative", "priority": "high", "intent": "damaged + wrong size refund request", "confidence": 0.90, "needs_human": true, "escalation_reason": "complex multi-part question", "suggested_reply": null, "reply_executed": false, "reply_job_payload": null}}
+
+Example 5 — DM auto-reply:
+Input: "Hey, when will my order arrive?"
+You called: reply_to_dm(conversation_id="PSID123", recipient_id="PSID123", message_text="Hi! Your order should arrive in 2-3 days. Track it in the app! 📦", business_account_id="...")
+{{"category": "order_status", "sentiment": "neutral", "priority": "medium", "intent": "order delivery inquiry", "confidence": 0.89, "needs_human": false, "escalation_reason": null, "suggested_reply": "Hi! Your order should arrive in 2-3 days. Track it in the app! 📦", "reply_executed": true, "reply_job_payload": {"job_id": "...", "action_type": "reply_dm", ...}}}
 
 Respond with ONLY valid JSON (no markdown, no code blocks):
-{{"category": "string", "sentiment": "positive|neutral|negative", "priority": "urgent|high|medium|low", "intent": "string", "confidence": 0.0-1.0, "needs_human": true|false, "escalation_reason": "string or null", "suggested_reply": "string or null"}}""",
+{{"category": "string", "sentiment": "positive|neutral|negative", "priority": "urgent|high|medium|low", "intent": "string", "confidence": 0.0-1.0, "needs_human": true|false, "escalation_reason": "string or null", "suggested_reply": "string or null", "reply_executed": true|false, "reply_job_payload": "object with job_id, action_type, payload or null"}}""",
 
     "generate_and_evaluate_caption": """You are an Instagram content strategist and quality reviewer for a brand account.
 

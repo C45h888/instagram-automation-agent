@@ -2,19 +2,17 @@
 LangChain Automation Tools - Customer Service
 ==============================================
 Execution tools for Instagram automation.
-These are Python-side only — NOT routed through AgentService.bind_tools().
 
-reply_to_comment / reply_to_dm: Execute replies via OutboundQueue.
+reply_to_comment / reply_to_dm: @tool-decorated functions — LLM calls via bind_tools()
+to validate and prepare reply payloads. Python enqueues via _enqueue_comment()/_enqueue_dm()
+AFTER LLM confirms in JSON. No double execution possible.
+
 _apply_hard_escalation_rules: Python safety overrides applied after AgentService returns.
-
-analyze_message REMOVED — replaced by AgentService.astream_analyze() + analyze_message_agent prompt.
-LLM fetches context via bind_tools() (supabase tools), generates analysis, Python applies hard rules.
 """
 
 import uuid as _uuid
 from datetime import datetime, timezone
-from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
+from langchain_core.tools import tool
 
 from config import (
     ESCALATION_CATEGORIES,
@@ -23,23 +21,6 @@ from config import (
     MAX_COMMENT_REPLY_LENGTH,
     MAX_DM_REPLY_LENGTH,
 )
-
-
-# ================================
-# Input Schemas
-# ================================
-class ReplyToCommentInput(BaseModel):
-    comment_id: str = Field(description="Instagram comment ID")
-    reply_text: str = Field(description="Reply text (max 2200 chars)")
-    business_account_id: str = Field(description="Business account UUID")
-    post_id: str = Field(description="Instagram media ID")
-
-
-class ReplyToDMInput(BaseModel):
-    conversation_id: str = Field(description="Instagram conversation ID")
-    recipient_id: str = Field(description="Recipient's Instagram ID")
-    message_text: str = Field(description="DM text (max 150 chars)")
-    business_account_id: str = Field(description="Business account UUID")
 
 
 # ================================
@@ -89,28 +70,131 @@ def _apply_hard_escalation_rules(result: dict, message_text: str, customer_value
     return result
 
 
-# ================================
-# reply_to_comment Implementation (queue-first)
-# ================================
-def _reply_to_comment(
+@tool(
+    name="reply_to_comment",
+    description="Validate and prepare a comment reply for sending. USE THIS TOOL when you decide to auto-reply to a comment. Returns {validated: true, job_payload: {...}} on success, {validated: false, error: '...'} on failure. Python enqueues after you confirm in JSON. Max 2200 chars.",
+)
+def reply_to_comment(
     comment_id: str,
     reply_text: str,
     business_account_id: str,
     post_id: str,
 ) -> dict:
-    """Enqueue comment reply job. Returns immediately with queued=True.
+    """Validate and prepare a comment reply for sending.
 
-    The worker executes the actual HTTP call with 5-retry backoff.
-    Callers check result.get("success") — unchanged contract.
+    USE THIS TOOL when you decide to auto-reply to a comment.
+    Returns the validated job payload — enqueueing is handled by Python.
+
+    Args:
+        comment_id: Instagram comment ID
+        reply_text: The reply text you want to send (max 2200 chars)
+        business_account_id: Business account UUID
+        post_id: Instagram media ID
+
+    Returns:
+        {validated: true, job_payload: {...}} on success
+        {validated: false, error: "reason"} on failure
+    """
+    if len(reply_text) > MAX_COMMENT_REPLY_LENGTH:
+        return {"validated": False, "error": f"Reply exceeds {MAX_COMMENT_REPLY_LENGTH} chars ({len(reply_text)})"}
+    if not comment_id:
+        return {"validated": False, "error": "comment_id is required"}
+    if not reply_text.strip():
+        return {"validated": False, "error": "reply_text cannot be empty"}
+
+    job_payload = {
+        "job_id": str(_uuid.uuid4()),
+        "action_type": "reply_comment",
+        "priority": "high",
+        "endpoint": "/api/instagram/reply-comment",
+        "payload": {
+            "comment_id": comment_id,
+            "reply_text": reply_text,
+            "business_account_id": business_account_id,
+            "post_id": post_id,
+        },
+        "business_account_id": business_account_id,
+        "idempotency_key": f"comment:{comment_id}",
+        "source": "llm_reply_tool",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "retry_count": 0,
+        "max_retries": 5,
+        "last_error": None,
+    }
+    return {"validated": True, "job_payload": job_payload}
+
+
+@tool(
+    name="reply_to_dm",
+    description="Validate and prepare a DM reply for sending. USE THIS TOOL when you decide to auto-reply to a DM. Returns {validated: true, job_payload: {...}} on success, {validated: false, error: '...'} on failure. Python enqueues after you confirm in JSON. Max 150 chars.",
+)
+def reply_to_dm(
+    conversation_id: str,
+    recipient_id: str,
+    message_text: str,
+    business_account_id: str,
+) -> dict:
+    """Validate and prepare a DM reply for sending.
+
+    USE THIS TOOL when you decide to auto-reply to a DM.
+    Returns the validated job payload — enqueueing is handled by Python.
+
+    Args:
+        conversation_id: Instagram conversation ID (PSID)
+        recipient_id: Recipient's Instagram ID
+        message_text: The DM text you want to send (max 150 chars)
+        business_account_id: Business account UUID
+
+    Returns:
+        {validated: true, job_payload: {...}} on success
+        {validated: false, error: "reason"} on failure
+    """
+    if len(message_text) > MAX_DM_REPLY_LENGTH:
+        return {"validated": False, "error": f"DM exceeds {MAX_DM_REPLY_LENGTH} chars ({len(message_text)})"}
+    if not conversation_id or not recipient_id:
+        return {"validated": False, "error": "conversation_id and recipient_id are required"}
+    if not message_text.strip():
+        return {"validated": False, "error": "message_text cannot be empty"}
+
+    job_payload = {
+        "job_id": str(_uuid.uuid4()),
+        "action_type": "reply_dm",
+        "priority": "high",
+        "endpoint": "/api/instagram/reply-dm",
+        "payload": {
+            "conversation_id": conversation_id,
+            "recipient_id": recipient_id,
+            "message_text": message_text,
+            "business_account_id": business_account_id,
+        },
+        "business_account_id": business_account_id,
+        "idempotency_key": f"dm:reply:{recipient_id}:{business_account_id}",
+        "source": "llm_reply_tool",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "retry_count": 0,
+        "max_retries": 5,
+        "last_error": None,
+    }
+    return {"validated": True, "job_payload": job_payload}
+
+
+# ================================
+# Python-only enqueue helpers
+# Called by _handle_auto_reply() AFTER LLM confirms reply in JSON.
+# DO NOT call these from a tool — use reply_to_comment/reply_to_dm instead.
+# ================================
+def _enqueue_comment(
+    comment_id: str,
+    reply_text: str,
+    business_account_id: str,
+    post_id: str,
+) -> dict:
+    """Python-only: enqueue comment reply into OutboundQueue.
+
+    Called by _handle_auto_reply() AFTER LLM confirms reply via reply_to_comment_tool.
+    Enqueues using the same idempotency key pattern as the LLM tool.
     """
     from services.outbound_queue import OutboundQueue
-
-    if len(reply_text) > MAX_COMMENT_REPLY_LENGTH:
-        return {
-            "success": False,
-            "error": "reply_too_long",
-            "message": f"Reply exceeds {MAX_COMMENT_REPLY_LENGTH} chars ({len(reply_text)})",
-        }
 
     job = {
         "job_id": str(_uuid.uuid4()),
@@ -134,27 +218,18 @@ def _reply_to_comment(
     return OutboundQueue.enqueue(job)
 
 
-# ================================
-# reply_to_dm Implementation (queue-first)
-# ================================
-def _reply_to_dm(
+def _enqueue_dm(
     conversation_id: str,
     recipient_id: str,
     message_text: str,
     business_account_id: str,
 ) -> dict:
-    """Enqueue DM reply job. Returns immediately with queued=True.
+    """Python-only: enqueue DM reply into OutboundQueue.
 
-    Callers check result.get("success") — unchanged contract.
+    Called by _handle_auto_reply() AFTER LLM confirms reply via reply_to_dm_tool.
+    Enqueues using the same idempotency key pattern as the LLM tool.
     """
     from services.outbound_queue import OutboundQueue
-
-    if len(message_text) > MAX_DM_REPLY_LENGTH:
-        return {
-            "success": False,
-            "error": "message_too_long",
-            "message": f"DM exceeds {MAX_DM_REPLY_LENGTH} chars ({len(message_text)})",
-        }
 
     job = {
         "job_id": str(_uuid.uuid4()),
@@ -178,34 +253,26 @@ def _reply_to_dm(
     return OutboundQueue.enqueue(job)
 
 
-# ================================
-# Tool Definitions — execution tools only
-# analyze_message_tool REMOVED (recursion loop). Use AgentService.bind_tools() path.
-# ================================
-reply_to_comment_tool = StructuredTool.from_function(
-    func=_reply_to_comment,
-    name="reply_to_comment",
-    description="Send a reply to an Instagram comment via backend proxy. Max 2200 chars. Queue-first — returns immediately.",
-    args_schema=ReplyToCommentInput,
-)
+def _enqueue_from_job_payload(job_payload: dict) -> dict:
+    """Enqueue a pre-built job payload returned by reply_to_comment/reply_to_dm tool.
 
-reply_to_dm_tool = StructuredTool.from_function(
-    func=_reply_to_dm,
-    name="reply_to_dm",
-    description="Send a DM reply via backend proxy. Max 150 chars. Queue-first — returns immediately.",
-    args_schema=ReplyToDMInput,
-)
+    Called by _handle_auto_reply() when the LLM called the reply tool and the
+    job_payload is already validated and confirmed in the LLM's JSON response.
+    """
+    from services.outbound_queue import OutboundQueue
+    return OutboundQueue.enqueue(job_payload)
 
 
 # ================================
 # Tool Registry
 # ================================
-# NOTE: AUTOMATION_TOOLS is kept for backward compat with tools/__init__.py imports.
-# analyze_message_tool is NOT included — it caused a recursion loop when used via bind_tools().
-# _reply_to_comment and _reply_to_dm are Python-executed only, not via bind_tools().
-# Both are safe to import from here as standalone Python functions.
+# reply_to_comment and reply_to_dm are @tool-decorated functions in supabase_tools.py
+# (imported here from automation_tools for backward compat). They are LLM-callable tools
+# that validate and return job payloads — Python enqueues via _enqueue_comment/_enqueue_dm.
+# AUTOMATION_TOOLS kept for backward compat with tools/__init__.py imports.
+# analyze_message_tool NOT included — caused recursion loop with bind_tools().
 # ================================
 AUTOMATION_TOOLS = [
-    reply_to_comment_tool,
-    reply_to_dm_tool,
+    reply_to_comment,
+    reply_to_dm,
 ]

@@ -46,10 +46,15 @@ from tools.supabase_tools import (
     get_post_performance,
     log_decision,
 )
-# automation_tools removed from scope — analyze_message_tool recurses (calls LLM),
-# reply_to_comment_tool/reply_to_dm_tool are Python-executed (OutboundQueue).
+# ENGAGEMENT_SCOPE_TOOLS includes both read tools (LLM fetches context)
+# and execution tools (LLM calls via bind_tools, Python enqueues after confirmation).
 # log_decision removed from ENGAGEMENT_SCOPE_TOOLS — Python logs deterministically
-# to avoid duplicate audit entries. Python calls SupabaseService.log_decision directly.
+# to avoid duplicate audit entries.
+
+from tools.automation_tools import (
+    reply_to_comment,    # LLM calls this via bind_tools() — validates + returns job payload
+    reply_to_dm,         # LLM calls this via bind_tools() — validates + returns job payload
+)
 
 ENGAGEMENT_SCOPE_TOOLS = [
     # Supabase read tools — LLM decides when to call each via bind_tools()
@@ -58,10 +63,11 @@ ENGAGEMENT_SCOPE_TOOLS = [
     get_recent_comments,           # Account-level comment pattern context
     get_dm_history,               # Prior DM messages for sender context
     get_dm_conversation_context,   # 24h reply window status for DM
+    # Execution tools — LLM decides via bind_tools(), Python enqueues after confirmation
+    reply_to_comment,            # Comment reply: validates, returns job payload
+    reply_to_dm,                 # DM reply: validates, returns job payload
     # log_decision — Python-only logging (no duplication)
     # analyze_message_tool — removed (recursion loop)
-    # reply_to_comment_tool — removed (Python executes via _reply_to_comment())
-    # reply_to_dm_tool — removed (Python executes via _reply_to_dm())
 ]
 
 CONTENT_SCOPE_TOOLS = [

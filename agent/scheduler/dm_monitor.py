@@ -51,7 +51,7 @@ from config import (
 from services.supabase_service import SupabaseService, _redis, _redis_available
 from services.agent_service import AgentService
 from services.prompt_service import PromptService
-from tools.automation_tools import _apply_hard_escalation_rules, _reply_to_dm
+from tools.automation_tools import _apply_hard_escalation_rules, _enqueue_dm, _enqueue_from_job_payload
 
 
 # ================================
@@ -308,17 +308,37 @@ def _handle_escalation(run_id: str, msg: dict, account: dict, analysis: dict) ->
 def _handle_auto_reply(
     run_id: str, msg: dict, account: dict, analysis: dict, customer_ig_id: str
 ) -> dict:
+    """Execute reply: LLM confirmed via reply_to_dm_tool, Python enqueues here.
+
+    LLM's JSON contains reply_executed=true and reply_job_payload when it called
+    the reply_to_dm tool. Python uses the job_payload to enqueue via OutboundQueue.
+
+    If LLM did not call the tool (reply_job_payload is null) but set suggested_reply,
+    Python falls back to enqueueing directly from the suggested_reply text.
+    """
     msg_id = msg.get("id", "")
     instagram_message_id = msg.get("instagram_message_id", "")
     suggested_reply = analysis.get("suggested_reply", "")
 
-    # conversation_id for the backend proxy = customer's IG PSID (same as webhook pattern)
-    result = _reply_to_dm(
-        conversation_id=customer_ig_id,
-        recipient_id=customer_ig_id,
-        message_text=suggested_reply,
-        business_account_id=account.get("id", ""),
-    )
+    # LLM confirmed reply via reply_to_dm_tool — use its validated job payload
+    reply_job_payload = analysis.get("reply_job_payload")
+
+    if reply_job_payload:
+        # LLM called reply_to_dm_tool and it validated — use its job payload
+        result = _enqueue_from_job_payload(reply_job_payload)
+        # Override suggested_reply with what LLM confirmed via tool call
+        suggested_reply = reply_job_payload.get("payload", {}).get("message_text", suggested_reply)
+        llm_tool_used = True
+    else:
+        # Fallback: LLM didn't call the tool but set suggested_reply in JSON
+        # Python enqueues directly from the suggested_reply text
+        result = _enqueue_dm(
+            conversation_id=customer_ig_id,
+            recipient_id=customer_ig_id,
+            message_text=suggested_reply,
+            business_account_id=account.get("id", ""),
+        )
+        llm_tool_used = False
 
     was_replied = result.get("success", False)
 
@@ -346,13 +366,14 @@ def _handle_auto_reply(
             "confidence": analysis.get("confidence"),
             "suggested_reply": suggested_reply,
             "reply_sent": was_replied,
+            "llm_tool_used": llm_tool_used,  # Did LLM call reply_to_dm_tool?
             "execution_id": result.get("execution_id"),
             "error": result.get("error") if not was_replied else None,
         },
     )
 
     if was_replied:
-        logger.info(f"[{run_id}] Auto-replied to DM {msg_id}")
+        logger.info(f"[{run_id}] Auto-replied to DM {msg_id} (llm_tool={llm_tool_used})")
     else:
         logger.warning(f"[{run_id}] Reply failed for DM {msg_id}: {result.get('error')}")
 

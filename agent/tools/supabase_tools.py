@@ -34,6 +34,10 @@ from services.supabase_service._dm_tools import (
     get_dm_conversation_context,
 )
 from services.supabase_service._ops_tools import log_decision
+from tools.automation_tools import (
+    reply_to_comment,
+    reply_to_dm,
+)
 
 
 def _as_structured_tool(tool_func) -> StructuredTool:
@@ -49,8 +53,10 @@ def _as_structured_tool(tool_func) -> StructuredTool:
 # ================================
 # Tool Registry
 # ================================
-# All 7 tools from the original supabase_tools.py, now @tool-decorated.
+# All 7 original tools + 2 reply execution tools.
 # Maps directly to what AgentService binds in scoped tool sets.
+# reply_to_comment and reply_to_dm: LLM calls via bind_tools(),
+# Python enqueues via _enqueue_comment()/_enqueue_dm() after confirmation.
 # ================================
 SUPABASE_TOOLS = [
     _as_structured_tool(get_post_context),
@@ -60,4 +66,6 @@ SUPABASE_TOOLS = [
     _as_structured_tool(get_dm_conversation_context),
     _as_structured_tool(get_post_performance),
     _as_structured_tool(log_decision),
+    _as_structured_tool(reply_to_comment),
+    _as_structured_tool(reply_to_dm),
 ]
