@@ -18,7 +18,7 @@ Pattern:
 
 from langchain_core.tools import tool
 
-from services.ids import InstagramId, SupabaseUUID
+from services.ids import InstagramId
 from services.supabase_service._infra import enforce_return
 from ._engagement import EngagementService
 
@@ -30,8 +30,18 @@ def get_post_context(post_id: InstagramId) -> dict:
     """Fetch post context from instagram_media.
 
     Args:
-        post_id: InstagramId — Instagram media ID to fetch context for (not the Supabase UUID)
+        post_id: Instagram media ID string (LLM passes plain string, coerced here).
+
+    Coercion: plain strings from the LLM are coerced to InstagramId so the
+    typed ID boundary in EngagementService.verify_id_space() passes. This
+    is the LLM→Python type bridge — tools invoked by bind_tools() always
+    receive JSON-native types from LangChain.
     """
+    # LLM always passes plain string through bind_tools() JSON schema.
+    # InstagramId subclass carries no runtime value (it's a str subclass),
+    # so coercion is safe and makes the verify_id_space() call in the
+    # service layer pass silently instead of raising TypeError.
+    post_id = InstagramId(str(post_id))
     return EngagementService.get_post_context(post_id)
 
 

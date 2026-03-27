@@ -2,7 +2,9 @@
 Shared Webhook Pipeline
 ========================
 Generic hook-based pipeline for Instagram webhook processing.
-Handles the full analyze->decide->execute flow for direct Instagram events.
+In the new architecture, webhooks write to Supabase only. Analysis and
+reply execution are deferred to the engagement/dm monitors via
+AgentService.bind_tools().
 
 Features:
 - HMAC-SHA256 signature verification
@@ -22,10 +24,10 @@ from typing import Callable, Optional, Any
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 
-from config import logger, OLLAMA_MODEL, INSTAGRAM_APP_SECRET
+from config import logger, INSTAGRAM_APP_SECRET
 from services.supabase_service import SupabaseService
 from routes.health import track_request
-from routes.metrics import REQUEST_COUNT, REQUEST_LATENCY, APPROVAL_DECISIONS, LLM_ERRORS
+from routes.metrics import REQUEST_COUNT, REQUEST_LATENCY, APPROVAL_DECISIONS
 
 
 @dataclass
@@ -88,15 +90,17 @@ def _get_request_id(request: Request) -> str:
 async def webhook_pipeline(raw_payload: dict, body: bytes, request: Request, config: WebhookConfig):
     """Generic webhook pipeline for Instagram messages.
 
+    In the new architecture, webhooks write to Supabase only. The monitors
+    (engagement_monitor, dm_monitor) poll Supabase, run analysis via
+    AgentService.bind_tools(), and execute replies.
+
     Flow:
       1. Verify signature
       2. Parse payload
-      3. Hard rules (short-circuit if triggered)
-      4. Fetch context from Supabase
-      5. Analyze message using tool
-      6. Pre-execute check (e.g., 24h window for DMs)
-      7. Execute reply if approved
-      8. Audit log
+      3. Hard rules (short-circuit if triggered) — e.g., empty DM, attachments
+      4. Fetch context / write-through to Supabase
+      5. Build response (no analysis in webhook)
+      6. Audit log
     """
     pipeline_start = time.time()
     request_id = _get_request_id(request)
@@ -145,69 +149,54 @@ async def webhook_pipeline(raw_payload: dict, body: bytes, request: Request, con
             REQUEST_COUNT.labels(endpoint=endpoint, status="hard_rule").inc()
             return hard_rule_response
 
-    # Step 4: Fetch context
-    context = config.fetch_context(parsed)
+    # Step 4: Fetch context (optional — write-through for DM conversations, no-ops for comments)
+    context = config.fetch_context(parsed) if config.fetch_context else {}
 
-    # Step 5: Build analysis input and run analysis
-    analysis_input = config.build_analysis_input(parsed, context)
-
-    # Import tool function directly to avoid circular imports
-    from tools.automation_tools import _analyze_message
-    analysis_result = await _analyze_message(**analysis_input)
-
-    if "error" in analysis_result and analysis_result.get("error") != "json_parse_failed":
-        logger.error(f"[{request_id}] Analysis failed: {analysis_result}")
-        LLM_ERRORS.labels(error_type=analysis_result.get("error", "unknown")).inc()
-        REQUEST_COUNT.labels(endpoint=endpoint, status="analysis_error").inc()
-        return JSONResponse(
-            status_code=503,
-            content={
-                "processed": False,
-                "error": "analysis_failed",
-                "message": "Could not analyze message",
-                "request_id": request_id,
-            }
-        )
+    # Step 5: In the new architecture, webhooks write to Supabase only.
+    # Analysis and reply execution are handled by the engagement/dm monitors
+    # via AgentService.bind_tools(). Webhooks return immediately after write.
+    # analysis_result is kept as empty dict for hook compatibility.
+    analysis_result: dict = {}
 
     latency = int((time.time() - pipeline_start) * 1000)
     track_request(latency)
 
-    # Step 6: Pre-execute check (e.g., 24h window, needs_human)
-    exec_result = {"executed": False, "reason": "not_attempted"}
+    # Step 6: Pre-execute check (e.g., 24h window for DMs)
+    # In new architecture, this is deferred to the monitor unless the webhook
+    # has a pre_execute_check hook defined (DM webhook keeps it for attachment/empty checks).
+    exec_result = {"executed": False, "reason": "deferred_to_monitor"}
 
-    if analysis_result.get("needs_human"):
-        exec_result = {
-            "executed": False,
-            "reason": "escalated_to_human",
-            "escalation_reason": analysis_result.get("escalation_reason"),
-        }
-    elif config.pre_execute_check:
+    if config.pre_execute_check:
         pre_check = config.pre_execute_check(parsed, analysis_result)
         if pre_check is not None:
             exec_result = pre_check
-        else:
-            # Step 7: Execute reply
+            # If pre-check blocked execution (e.g., outside 24h window), skip execute_reply
+        elif config.execute_reply:
             exec_result = config.execute_reply(parsed, analysis_result)
-    else:
-        # Step 7: Execute reply (no pre-check needed)
+    elif config.execute_reply:
+        # No pre-check needed — execute_reply is still called but returns no-op
+        # when analysis_result is empty (suggested_reply not present)
         exec_result = config.execute_reply(parsed, analysis_result)
 
-    # Step 8: Build response
+    # Step 7: Build response
     response = config.build_response(parsed, analysis_result)
     response["execution"] = exec_result
     response["request_id"] = request_id
     response["audit_data"] = {
         "request_id": request_id,
-        "analyzed_at": datetime.now(timezone.utc).isoformat(),
-        "agent_model": OLLAMA_MODEL,
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+        # agent_model and analyzed_at are set by the monitor when it processes this record
         "latency_ms": latency,
+        "note": "analysis deferred to engagement/dm monitor",
     }
 
     # Determine action for audit
+    # In new architecture: webhooks write to Supabase only, monitors execute replies.
+    # analysis_result is {} so needs_human check is always False here.
     if exec_result.get("executed"):
         action = "auto_replied"
-    elif analysis_result.get("needs_human"):
-        action = "escalated"
+    elif exec_result.get("reason") == "deferred_to_monitor":
+        action = "queued_for_processing"
     else:
         action = "processed_no_reply"
 

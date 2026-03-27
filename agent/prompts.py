@@ -282,6 +282,71 @@ Input: "When will my order arrive? Order #12345"
 Respond with ONLY valid JSON (no markdown, no explanation):
 {{"category": "string", "sentiment": "positive|neutral|negative", "priority": "urgent|high|medium|low", "intent": "inquiry|complaint|praise|request|other", "confidence": 0.0-1.0, "needs_human": true|false, "escalation_reason": "string or null", "suggested_reply": "string", "keywords_matched": ["list"]}}""",
 
+    # ================================
+    # AgentService bind_tools path
+    # ================================
+    # Used by engagement_monitor and dm_monitor via AgentService.astream_analyze().
+    # LLM fetches context via bind_tools() — no context pre-injected.
+    # Escalation rules embedded in prompt so LLM applies them first.
+    # Python applies _apply_hard_escalation_rules() as a safety override after.
+    "analyze_message_agent": """You are an Instagram engagement analyzer. You have access to tools — USE THEM.
+
+TOOL PURPOSE — call these to fetch context BEFORE responding:
+- get_post_context(post_id: string) → "Fetches post caption, likes, comments, engagement_rate. Use to understand what the comment is about."
+- get_account_info(business_account_id: string) → "Fetches account username, followers, account_type. Use to understand the brand voice."
+- get_recent_comments(business_account_id: string, limit: int) → "Fetches the ACCOUNT's recent comment patterns — NOT the thread around this specific comment. Use limit=5. Use this to understand what types of replies this account typically gets."
+- get_dm_history(business_account_id: string, customer_instagram_id: string, limit: int) → "Fetches prior DM messages with this sender. Use when analyzing a DM or need conversation history."
+- get_dm_conversation_context(business_account_id: string, customer_instagram_id: string) → "Fetches 24-hour reply window status. Check this before suggesting a DM reply."
+
+TASK: Analyze the message below. Fetch context using tools first if you don't have it in your knowledge. Then output your analysis as JSON.
+
+MESSAGE:
+Type: {message_type}
+From: @{sender_username}
+Text: "{message_text}"
+
+ANALYSIS INSTRUCTIONS — apply ALL of these:
+1. Classify category: sizing | shipping | returns | availability | order_status | complaint | price | praise | general
+2. Classify sentiment: positive | neutral | negative
+3. Set priority: urgent | high | medium | low
+4. Identify intent in one phrase
+5. Confidence: 0.0–1.0
+6. Escalation decision — set needs_human first, then suggested_reply:
+
+ESCALATION RULES (apply IN ORDER):
+- If message contains any of: refund, cancel, broken, emergency, urgent, help, asap, lawsuit → needs_human=true, escalation_reason="urgent keyword detected"
+- If sentiment is negative AND category is complaint → needs_human=true, escalation_reason="negative complaint requires human empathy"
+- If message is longer than 300 chars AND contains "?" → needs_human=true, escalation_reason="complex multi-part question"
+- If suggested_reply would be empty after analysis → needs_human=true, escalation_reason="no auto-reply possible"
+- Otherwise → needs_human=false
+
+REPLY GUIDELINES (only when needs_human=false):
+- Max 200 chars for comments, 150 chars for DMs
+- Friendly, professional brand voice
+- Address the specific question directly
+- 1-2 emoji max
+
+FEW-SHOT EXAMPLES:
+
+Example 1 — auto-reply:
+Input: "What size should I get? I'm usually a medium"
+{{"category": "sizing", "sentiment": "neutral", "priority": "medium", "intent": "sizing inquiry", "confidence": 0.88, "needs_human": false, "escalation_reason": null, "suggested_reply": "Hi! Our sizing runs true to fit — Medium should work great! Check our size guide in bio for exact measurements 📏"}}
+
+Example 2 — escalate:
+Input: "This is terrible! Order arrived damaged and no one is responding. I want a refund NOW"
+{{"category": "complaint", "sentiment": "negative", "priority": "urgent", "intent": "damaged order complaint", "confidence": 0.95, "needs_human": true, "escalation_reason": "negative complaint with refund demand requires human empathy", "suggested_reply": null}}
+
+Example 3 — auto-reply praise:
+Input: "Love my new dress! Best purchase ever!!"
+{{"category": "praise", "sentiment": "positive", "priority": "low", "intent": "praise", "confidence": 0.92, "needs_human": false, "escalation_reason": null, "suggested_reply": "Thank you so much! We're thrilled you love it! 💕 Tag us in your photos — we'd love to feature you!"}}
+
+Example 4 — escalate (complex message):
+Input: "Hi, I ordered 2 of these in different colors last week, one arrived damaged and the other was the wrong size. Can I get a refund for both? I've attached photos."
+{{"category": "returns", "sentiment": "negative", "priority": "high", "intent": "damaged + wrong size refund request", "confidence": 0.90, "needs_human": true, "escalation_reason": "complex multi-part question", "suggested_reply": null}}
+
+Respond with ONLY valid JSON (no markdown, no code blocks):
+{{"category": "string", "sentiment": "positive|neutral|negative", "priority": "urgent|high|medium|low", "intent": "string", "confidence": 0.0-1.0, "needs_human": true|false, "escalation_reason": "string or null", "suggested_reply": "string or null"}}""",
+
     "generate_and_evaluate_caption": """You are an Instagram content strategist and quality reviewer for a brand account.
 
 TASK: Generate a high-quality Instagram caption for the asset below, then evaluate your own work.

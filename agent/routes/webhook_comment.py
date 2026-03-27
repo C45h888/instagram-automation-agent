@@ -4,7 +4,12 @@ Instagram Comment Webhook Handler
 Receives ONLY direct webhook events from Meta's Instagram Graph API.
 NOT an N8N forwarding layer — the agent is sovereign.
 
-Flow: Instagram → HMAC-verified POST → analyze → auto-reply → audit_log
+New architecture: Webhook writes to Supabase only. The engagement_monitor
+polls Supabase, runs AgentService.bind_tools() for analysis, and executes
+replies. This separates concerns and avoids the recursion loop.
+
+Flow: Instagram → HMAC-verified POST → write to Supabase → return
+(Analysis and reply execution deferred to engagement_monitor)
 
 Endpoints:
   GET  /webhook/comment - Meta verification challenge
@@ -17,7 +22,6 @@ from config import INSTAGRAM_VERIFY_TOKEN, WEBHOOK_RATE_LIMIT
 from services.validation import CommentWebhookData
 from services.supabase_service import SupabaseService
 from routes.webhook_base import WebhookConfig, webhook_pipeline
-from tools.automation_tools import _reply_to_comment
 
 webhook_comment_router = APIRouter()
 
@@ -66,65 +70,27 @@ def _parse_payload(raw: dict) -> CommentWebhookData:
     )
 
 
-def _fetch_context(parsed: CommentWebhookData) -> dict:
-    """Fetch post and account context for comment analysis."""
-    return {
-        "post": SupabaseService.get_post_context(parsed.post_id),
-        "account": SupabaseService.get_account_info(parsed.business_account_id),
-    }
-
-
-def _build_analysis_input(parsed: CommentWebhookData, ctx: dict) -> dict:
-    """Build input for analyze_message tool."""
-    return {
-        "message_text": parsed.comment_text,
-        "message_type": "comment",
-        "sender_username": parsed.commenter_username,
-        "account_context": ctx.get("account", {}),
-        "post_context": ctx.get("post"),
-        "dm_history": None,
-        "customer_lifetime_value": 0.0,  # Could be fetched from DB if available
-    }
-
-
 def _build_response(parsed: CommentWebhookData, analysis: dict) -> dict:
-    """Build response payload."""
+    """Build response payload.
+
+    In the new architecture, analysis is empty (deferred to monitor).
+    Returns a queued-for-processing response.
+    """
     return {
         "processed": True,
+        "status": "queued_for_processing",
         "comment_id": parsed.comment_id,
-        "category": analysis.get("category"),
-        "sentiment": analysis.get("sentiment"),
-        "priority": analysis.get("priority"),
-        "needs_human": analysis.get("needs_human", False),
-        "suggested_reply": analysis.get("suggested_reply"),
-        "confidence": analysis.get("confidence", 0),
+        "source": "webhook",
     }
 
 
 def _execute_reply(parsed: CommentWebhookData, analysis: dict) -> dict:
-    """Execute comment reply if analysis approves."""
-    suggested_reply = analysis.get("suggested_reply", "")
+    """Execute comment reply — NO-OP in new architecture.
 
-    if not suggested_reply:
-        return {"executed": False, "reason": "no_reply_suggested"}
-
-    # Only auto-reply if not escalated
-    if analysis.get("needs_human"):
-        return {"executed": False, "reason": "escalated_to_human"}
-
-    result = _reply_to_comment(
-        comment_id=parsed.comment_id,
-        reply_text=suggested_reply,
-        business_account_id=parsed.business_account_id,
-        post_id=parsed.post_id,
-    )
-
-    return {
-        "executed": result.get("success", False),
-        "reply_sent": suggested_reply if result.get("success") else None,
-        "execution_id": result.get("execution_id"),
-        "error": result.get("error") if not result.get("success") else None,
-    }
+    Analysis and reply execution are deferred to the engagement monitor.
+    This hook is kept to preserve the response structure but returns no-op.
+    """
+    return {"executed": False, "reason": "deferred_to_monitor"}
 
 
 def _build_audit_details(parsed: CommentWebhookData, analysis: dict, exec_result: dict, latency: int) -> dict:
@@ -164,6 +130,9 @@ def _build_audit_details(parsed: CommentWebhookData, analysis: dict, exec_result
 # ================================
 # Config
 # ================================
+# In new architecture: webhooks write to Supabase only.
+# _fetch_context and _build_analysis_input removed (deferred to engagement_monitor).
+# _execute_reply kept as no-op to preserve response structure.
 _config = WebhookConfig(
     message_type="comment",
     event_type="webhook_comment_processed",
@@ -171,8 +140,6 @@ _config = WebhookConfig(
     parse_payload=_parse_payload,
     get_resource_id=lambda p: p.comment_id,
     get_user_id=lambda p: p.business_account_id,
-    fetch_context=_fetch_context,
-    build_analysis_input=_build_analysis_input,
     build_response=_build_response,
     execute_reply=_execute_reply,
     build_audit_details=_build_audit_details,

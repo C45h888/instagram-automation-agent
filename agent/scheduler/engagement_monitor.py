@@ -2,7 +2,8 @@
 Engagement Monitor
 ===================
 Scheduled batch pipeline that scans unprocessed Instagram comments,
-analyzes them via the LLM, and auto-replies or escalates.
+analyzes them via AgentService.bind_tools() (LLM fetches context), and
+auto-replies or escalates.
 
 Replaces the N8N engagement-monitor.json workflow entirely.
 
@@ -11,12 +12,19 @@ Flow per cycle:
   2. For each account, fetch unprocessed comments from Supabase
   3. Filter through Redis dedup (fast path)
   4. For each comment (parallel, semaphore-limited):
-     a. Fetch post context
-     b. Analyze via _analyze_message (LLM)
-     c. Route: escalate / auto-reply / skip
-     d. Mark processed in DB + Redis
-     e. Log decision to audit_log
+     a. Build prompt using analyze_message_agent template
+     b. Stream analysis via AgentService.astream_analyze() with bind_tools
+        - LLM fetches post/account/comment context via supabase tools
+        - LLM applies escalation rules in prompt
+     c. Accumulate response, parse JSON
+     d. Apply Python _apply_hard_escalation_rules() safety override
+     e. Route: escalate / auto-reply / skip
+     f. Mark processed in DB + Redis
+     g. Log decision to audit_log
   5. Log batch summary + update Prometheus metrics
+
+One AgentService(scope="engagement") instance per run — shared across
+all accounts and all comments to amortize initialization cost.
 
 Error isolation: Each comment is wrapped in try/except so a single
 failure never crashes the batch.
@@ -36,7 +44,9 @@ from config import (
 )
 from services.supabase_service import SupabaseService
 from scheduler.dedup_service import DedupService
-from tools.automation_tools import _analyze_message, _reply_to_comment
+from services.agent_service import AgentService
+from services.prompt_service import PromptService
+from tools.automation_tools import _apply_hard_escalation_rules, _reply_to_comment
 
 
 # ================================
@@ -47,6 +57,9 @@ async def engagement_monitor_run():
 
     Iterates all active business accounts, processes unprocessed comments,
     logs batch summary, and updates Prometheus metrics.
+
+    One AgentService(scope="engagement") instance is created per run and
+    shared across all accounts and all comments.
     """
     # Lazy import to avoid circular dependency at module load time
     from routes.metrics import (
@@ -62,6 +75,9 @@ async def engagement_monitor_run():
     stats = {"processed": 0, "replied": 0, "escalated": 0, "skipped": 0, "errors": 0}
 
     try:
+        # One AgentService instance per run — shared across all accounts
+        agent = AgentService(scope="engagement")
+
         accounts = SupabaseService.get_active_business_accounts()
         if not accounts:
             logger.info(f"[{run_id}] No active business accounts found — skipping cycle")
@@ -71,7 +87,7 @@ async def engagement_monitor_run():
         logger.info(f"[{run_id}] Found {len(accounts)} active account(s)")
 
         for account in accounts:
-            account_stats = await _process_account(run_id, account)
+            account_stats = await _process_account(run_id, account, agent)
             for key in stats:
                 stats[key] += account_stats.get(key, 0)
 
@@ -112,8 +128,11 @@ async def engagement_monitor_run():
 # ================================
 # Per-Account Processing
 # ================================
-async def _process_account(run_id: str, account: dict) -> dict:
-    """Fetch and process unprocessed comments for a single business account."""
+async def _process_account(run_id: str, account: dict, agent: AgentService) -> dict:
+    """Fetch and process unprocessed comments for a single business account.
+
+    agent is the shared AgentService(scope="engagement") instance from the run.
+    """
     account_id = account.get("id", "unknown")
     account_username = account.get("username", "unknown")
     stats = {"processed": 0, "replied": 0, "escalated": 0, "skipped": 0, "errors": 0}
@@ -161,7 +180,7 @@ async def _process_account(run_id: str, account: dict) -> dict:
     # Process with semaphore (limit concurrent LLM calls)
     semaphore = asyncio.Semaphore(ENGAGEMENT_MONITOR_MAX_CONCURRENT_ANALYSES)
     tasks = [
-        _process_comment_safe(run_id, comment, account, semaphore)
+        _process_comment_safe(run_id, comment, account, agent, semaphore)
         for comment in unprocessed
     ]
     results = await asyncio.gather(*tasks)
@@ -187,12 +206,12 @@ async def _process_account(run_id: str, account: dict) -> dict:
 # Per-Comment Processing (Error-Isolated)
 # ================================
 async def _process_comment_safe(
-    run_id: str, comment: dict, account: dict, semaphore: asyncio.Semaphore
+    run_id: str, comment: dict, account: dict, agent: AgentService, semaphore: asyncio.Semaphore
 ) -> dict:
     """Wraps _process_comment in try/except. NEVER fails the batch."""
     async with semaphore:
         try:
-            return await _process_comment(run_id, comment, account)
+            return await _process_comment(run_id, comment, account, agent)
         except Exception as e:
             comment_id = comment.get("id", "unknown")
             logger.error(f"[{run_id}] Comment {comment_id} failed: {e}")
@@ -200,43 +219,52 @@ async def _process_comment_safe(
             return {"action": "error", "comment_id": comment_id, "error": str(e)}
 
 
-async def _process_comment(run_id: str, comment: dict, account: dict) -> dict:
-    """Single comment pipeline: context -> analyze -> route -> execute -> mark -> log."""
+async def _process_comment(run_id: str, comment: dict, account: dict, agent: AgentService) -> dict:
+    """Single comment pipeline: build prompt -> AgentService.astream_analyze() -> apply hard rules -> route.
+
+    Context is fetched by the LLM via bind_tools() — no Python-side pre-fetch needed.
+    """
     comment_id = comment.get("id", "")
     instagram_comment_id = comment.get("instagram_comment_id", "")
     comment_text = comment.get("text", "")
     author = comment.get("author_username", "unknown")
-    media_id = comment.get("media_id", "")
+    account_id = account.get("id", "")
 
-    # 1. Fetch post context
-    post_ctx = SupabaseService.get_post_context_by_uuid(media_id)
-
-    # 2. Analyze via existing _analyze_message (runs LLM + hard escalation rules)
-    analysis = await _analyze_message(
+    # Build prompt — no context pre-injected; LLM fetches via bind_tools
+    prompt = _build_agent_prompt(
         message_text=comment_text,
         message_type="comment",
         sender_username=author,
-        account_context=account,
-        post_context=post_ctx,
-        dm_history=None,
-        customer_lifetime_value=0.0,
+        account_id=account_id,
+        media_id=instagram_comment_id,  # Instagram media ID so LLM can call get_post_context
     )
 
-    # 3. Route based on analysis result
-    if analysis.get("needs_human"):
-        return _handle_escalation(run_id, comment, account, analysis)
+    # Stream analysis via AgentService — LLM calls supabase tools as needed
+    accumulated = ""
+    async for chunk in agent.astream_analyze(prompt):
+        accumulated += chunk
 
-    suggested_reply = analysis.get("suggested_reply", "")
-    confidence = analysis.get("confidence", 0)
+    # Parse JSON response
+    result = AgentService._parse_json_response(accumulated)
+
+    # Python safety override — applies VIP, urgent keywords, complaints
+    result = _apply_hard_escalation_rules(result, comment_text, 0.0)
+
+    # Route based on analysis result
+    if result.get("needs_human"):
+        return _handle_escalation(run_id, comment, account, result)
+
+    suggested_reply = result.get("suggested_reply", "")
+    confidence = result.get("confidence", 0)
 
     if (
         suggested_reply
         and confidence >= ENGAGEMENT_MONITOR_CONFIDENCE_THRESHOLD
         and ENGAGEMENT_MONITOR_AUTO_REPLY_ENABLED
     ):
-        return _handle_auto_reply(run_id, comment, account, analysis, post_ctx)
+        return _handle_auto_reply(run_id, comment, account, result)
 
-    return _handle_skip(run_id, comment, account, analysis)
+    return _handle_skip(run_id, comment, account, result)
 
 
 # ================================
@@ -277,19 +305,27 @@ def _handle_escalation(run_id: str, comment: dict, account: dict, analysis: dict
 
 
 def _handle_auto_reply(
-    run_id: str, comment: dict, account: dict, analysis: dict, post_ctx: dict
+    run_id: str, comment: dict, account: dict, analysis: dict
 ) -> dict:
     """Execute reply, log outcome, mark processed."""
     comment_id = comment.get("id", "")
     instagram_comment_id = comment.get("instagram_comment_id", "")
     suggested_reply = analysis.get("suggested_reply", "")
+    account_id = account.get("id", "")
+
+    # Get Instagram media ID from the comment's media_id (Supabase UUID)
+    media_uuid = comment.get("media_id", "")
+    instagram_media_id = ""
+    if media_uuid:
+        post_ctx = SupabaseService.get_post_context_by_uuid(media_uuid)
+        instagram_media_id = post_ctx.get("instagram_media_id", "") if post_ctx else ""
 
     # Execute reply via existing tool (backend proxy with retry)
     result = _reply_to_comment(
         comment_id=instagram_comment_id,
         reply_text=suggested_reply,
-        business_account_id=account.get("id", ""),
-        post_id=post_ctx.get("instagram_media_id", ""),
+        business_account_id=account_id,
+        post_id=instagram_media_id,
     )
 
     was_replied = result.get("success", False)
@@ -369,6 +405,27 @@ def _handle_skip(run_id: str, comment: dict, account: dict, analysis: dict) -> d
 # ================================
 # Helpers
 # ================================
+def _build_agent_prompt(
+    message_text: str,
+    message_type: str,
+    sender_username: str,
+    account_id: str,
+    media_id: str,
+) -> str:
+    """Build the analyze_message_agent prompt for a comment.
+
+    Context is NOT pre-injected here — the LLM fetches it via bind_tools()
+    (get_post_context, get_account_info, get_recent_comments).
+    """
+    return PromptService.get("analyze_message_agent").format(
+        message_text=message_text,
+        message_type=message_type,
+        sender_username=sender_username,
+        account_id=account_id,
+        media_id=media_id,
+    )
+
+
 def _get_skip_reason(analysis: dict) -> str:
     """Determine why a comment was skipped (for audit logging)."""
     if not analysis.get("suggested_reply"):

@@ -2,7 +2,8 @@
 DM Monitor
 ===========
 Scheduled batch pipeline that scans unprocessed inbound Instagram DMs,
-analyzes them via the LLM, and auto-replies or escalates.
+analyzes them via AgentService.bind_tools() (LLM fetches context), and
+auto-replies or escalates.
 
 Fallback layer for when Instagram push webhooks (POST /webhook/dm) are not
 configured or temporarily unavailable. Polls Supabase every N minutes for
@@ -14,12 +15,19 @@ Flow per cycle:
      (is_from_business=false, processed_by_automation=false, sent_at within 24h)
   3. Filter through Redis dedup (fast path)
   4. For each message (parallel, semaphore-limited):
-     a. Fetch DM history for context
-     b. Analyze via _analyze_message (LLM)
-     c. Route: escalate / auto-reply / skip
-     d. Mark processed in DB + Redis
-     e. Log decision to audit_log
+     a. Build prompt using analyze_message_agent template
+     b. Stream analysis via AgentService.astream_analyze() with bind_tools
+        - LLM fetches DM history and conversation context via supabase tools
+        - LLM applies escalation rules in prompt
+     c. Accumulate response, parse JSON
+     d. Apply Python _apply_hard_escalation_rules() safety override
+     e. Route: escalate / auto-reply / skip
+     f. Mark processed in DB + Redis
+     g. Log decision to audit_log
   5. Log batch summary + update Prometheus metrics
+
+One AgentService(scope="engagement") instance per run — shared across
+all accounts and all messages.
 
 Error isolation: Each message is wrapped in try/except so a single
 failure never crashes the batch.
@@ -41,7 +49,9 @@ from config import (
     DM_MONITOR_CONFIDENCE_THRESHOLD,
 )
 from services.supabase_service import SupabaseService, _redis, _redis_available
-from tools.automation_tools import _analyze_message, _reply_to_dm
+from services.agent_service import AgentService
+from services.prompt_service import PromptService
+from tools.automation_tools import _apply_hard_escalation_rules, _reply_to_dm
 
 
 # ================================
@@ -77,7 +87,11 @@ def _mark_dm_dedup(message_id: str, account_id: str):
 # Entry Point (called by scheduler)
 # ================================
 async def dm_monitor_run():
-    """Top-level entry point called by APScheduler every N minutes."""
+    """Top-level entry point called by APScheduler every N minutes.
+
+    One AgentService(scope="engagement") instance is created per run and
+    shared across all accounts and all messages.
+    """
     from routes.metrics import DM_MONITOR_RUNS, DM_MONITOR_MESSAGES, DM_MONITOR_DURATION
 
     run_id = str(uuid_mod.uuid4())
@@ -87,6 +101,9 @@ async def dm_monitor_run():
     stats = {"processed": 0, "replied": 0, "escalated": 0, "skipped": 0, "errors": 0}
 
     try:
+        # One AgentService instance per run — shared across all accounts
+        agent = AgentService(scope="engagement")
+
         accounts = SupabaseService.get_active_business_accounts()
         if not accounts:
             logger.info(f"[{run_id}] No active business accounts found — skipping cycle")
@@ -96,7 +113,7 @@ async def dm_monitor_run():
         logger.info(f"[{run_id}] Found {len(accounts)} active account(s)")
 
         for account in accounts:
-            account_stats = await _process_account(run_id, account)
+            account_stats = await _process_account(run_id, account, agent)
             for key in stats:
                 stats[key] += account_stats.get(key, 0)
 
@@ -133,7 +150,7 @@ async def dm_monitor_run():
 # ================================
 # Per-Account Processing
 # ================================
-async def _process_account(run_id: str, account: dict) -> dict:
+async def _process_account(run_id: str, account: dict, agent: AgentService) -> dict:
     """Fetch and process unprocessed inbound DMs for a single business account."""
     account_id = account.get("id", "unknown")
     account_username = account.get("username", "unknown")
@@ -165,7 +182,7 @@ async def _process_account(run_id: str, account: dict) -> dict:
 
     semaphore = asyncio.Semaphore(DM_MONITOR_MAX_CONCURRENT_ANALYSES)
     tasks = [
-        _process_message_safe(run_id, msg, account, semaphore)
+        _process_message_safe(run_id, msg, account, agent, semaphore)
         for msg in unprocessed
     ]
     results = await asyncio.gather(*tasks)
@@ -190,12 +207,12 @@ async def _process_account(run_id: str, account: dict) -> dict:
 # Per-Message Processing (Error-Isolated)
 # ================================
 async def _process_message_safe(
-    run_id: str, msg: dict, account: dict, semaphore: asyncio.Semaphore
+    run_id: str, msg: dict, account: dict, agent: AgentService, semaphore: asyncio.Semaphore
 ) -> dict:
     """Wraps _process_message in try/except. NEVER fails the batch."""
     async with semaphore:
         try:
-            return await _process_message(run_id, msg, account)
+            return await _process_message(run_id, msg, account, agent)
         except Exception as e:
             msg_id = msg.get("id", "unknown")
             logger.error(f"[{run_id}] DM {msg_id} failed: {e}")
@@ -203,41 +220,54 @@ async def _process_message_safe(
             return {"action": "error", "message_id": msg_id, "error": str(e)}
 
 
-async def _process_message(run_id: str, msg: dict, account: dict) -> dict:
-    """Single DM pipeline: context → analyze → route → execute → mark → log."""
+async def _process_message(run_id: str, msg: dict, account: dict, agent: AgentService) -> dict:
+    """Single DM pipeline: build prompt -> AgentService.astream_analyze() -> apply hard rules -> route.
+
+    Context is fetched by the LLM via bind_tools() — no Python-side pre-fetch needed
+    (get_dm_history and get_dm_conversation_context are in ENGAGEMENT_SCOPE_TOOLS).
+    """
     msg_id = msg.get("id", "")
     instagram_message_id = msg.get("instagram_message_id", "")
     message_text = msg.get("message_text", "")
     customer_ig_id = msg.get("customer_instagram_id", "")
-    sender_username = msg.get("customer_username", "") or f"user_{customer_ig_id[-6:]}" if customer_ig_id else "unknown"
+    sender_username = msg.get("customer_username", "") or (f"user_{customer_ig_id[-6:]}" if customer_ig_id else "unknown")
+    account_id = account.get("id", "")
 
-    # Fetch prior conversation history for LLM context
-    dm_history = SupabaseService.get_dm_history(customer_ig_id, account.get("id", ""))
-
-    analysis = await _analyze_message(
+    # Build prompt — no context pre-injected; LLM fetches it via bind_tools
+    # customer_ig_id is passed as media_id so the LLM can call get_dm_history(customer_instagram_id)
+    prompt = _build_agent_prompt(
         message_text=message_text,
         message_type="dm",
         sender_username=sender_username,
-        account_context=account,
-        post_context=None,
-        dm_history=dm_history,
-        customer_lifetime_value=0.0,
+        account_id=account_id,
+        media_id=customer_ig_id,
     )
 
-    if analysis.get("needs_human"):
-        return _handle_escalation(run_id, msg, account, analysis)
+    # Stream analysis via AgentService — LLM calls supabase tools as needed
+    accumulated = ""
+    async for chunk in agent.astream_analyze(prompt):
+        accumulated += chunk
 
-    suggested_reply = analysis.get("suggested_reply", "")
-    confidence = analysis.get("confidence", 0)
+    # Parse JSON response
+    result = AgentService._parse_json_response(accumulated)
+
+    # Python safety override — applies VIP, urgent keywords, complaints
+    result = _apply_hard_escalation_rules(result, message_text, 0.0)
+
+    if result.get("needs_human"):
+        return _handle_escalation(run_id, msg, account, result)
+
+    suggested_reply = result.get("suggested_reply", "")
+    confidence = result.get("confidence", 0)
 
     if (
         suggested_reply
         and confidence >= DM_MONITOR_CONFIDENCE_THRESHOLD
         and DM_MONITOR_AUTO_REPLY_ENABLED
     ):
-        return _handle_auto_reply(run_id, msg, account, analysis, customer_ig_id)
+        return _handle_auto_reply(run_id, msg, account, result, customer_ig_id)
 
-    return _handle_skip(run_id, msg, account, analysis)
+    return _handle_skip(run_id, msg, account, result)
 
 
 # ================================
@@ -361,6 +391,28 @@ def _handle_skip(run_id: str, msg: dict, account: dict, analysis: dict) -> dict:
 # ================================
 # Helpers
 # ================================
+def _build_agent_prompt(
+    message_text: str,
+    message_type: str,
+    sender_username: str,
+    account_id: str,
+    media_id: str,
+) -> str:
+    """Build the analyze_message_agent prompt for a DM.
+
+    Context is NOT pre-injected here — the LLM fetches it via bind_tools()
+    (get_dm_history, get_dm_conversation_context, get_account_info).
+    media_id is the customer_instagram_id so the LLM can call get_dm_history.
+    """
+    return PromptService.get("analyze_message_agent").format(
+        message_text=message_text,
+        message_type=message_type,
+        sender_username=sender_username,
+        account_id=account_id,
+        media_id=media_id,
+    )
+
+
 def _get_skip_reason(analysis: dict) -> str:
     if not analysis.get("suggested_reply"):
         return "no_reply_suggested"

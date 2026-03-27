@@ -1,23 +1,22 @@
 """
 LangChain Automation Tools - Customer Service
 ==============================================
-Tools for analyzing Instagram messages and executing replies.
-Replaces N8N customer service workflow logic.
+Execution tools for Instagram automation.
+These are Python-side only — NOT routed through AgentService.bind_tools().
 
-Tools:
-  - analyze_message: Classify message, determine sentiment/priority, generate reply
-  - reply_to_comment: Execute comment reply via backend proxy
-  - reply_to_dm: Execute DM reply via backend proxy
+reply_to_comment / reply_to_dm: Execute replies via OutboundQueue.
+_apply_hard_escalation_rules: Python safety overrides applied after AgentService returns.
+
+analyze_message REMOVED — replaced by AgentService.astream_analyze() + analyze_message_agent prompt.
+LLM fetches context via bind_tools() (supabase tools), generates analysis, Python applies hard rules.
 """
 
 import uuid as _uuid
 from datetime import datetime, timezone
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
-from typing import Optional
 
 from config import (
-    logger,
     ESCALATION_CATEGORIES,
     URGENT_KEYWORDS,
     VIP_LIFETIME_VALUE_THRESHOLD,
@@ -29,16 +28,6 @@ from config import (
 # ================================
 # Input Schemas
 # ================================
-class AnalyzeMessageInput(BaseModel):
-    message_text: str = Field(description="The message text to analyze")
-    message_type: str = Field(description="'comment' or 'dm'")
-    sender_username: str = Field(description="Sender's username")
-    account_context: dict = Field(default_factory=dict, description="Brand account info")
-    post_context: Optional[dict] = Field(default=None, description="Post context if comment")
-    dm_history: Optional[list] = Field(default=None, description="Recent DM history")
-    customer_lifetime_value: float = Field(default=0.0, description="Customer LTV")
-
-
 class ReplyToCommentInput(BaseModel):
     comment_id: str = Field(description="Instagram comment ID")
     reply_text: str = Field(description="Reply text (max 2200 chars)")
@@ -54,73 +43,18 @@ class ReplyToDMInput(BaseModel):
 
 
 # ================================
-# analyze_message Implementation
+# Python safety overrides — applied AFTER AgentService.astream_analyze() returns
 # ================================
-async def _analyze_message(
-    message_text: str,
-    message_type: str,
-    sender_username: str,
-    account_context: dict,
-    post_context: Optional[dict] = None,
-    dm_history: Optional[list] = None,
-    customer_lifetime_value: float = 0.0,
-) -> dict:
-    """Analyze incoming Instagram message - classification, sentiment, reply generation.
-
-    Flow:
-    1. Build prompt with context
-    2. Invoke LLM for analysis
-    3. Apply hard escalation rules
-    4. Return structured result
-    """
-    from services.prompt_service import PromptService
-
-    # Format DM history for context
-    dm_history_summary = "No prior messages"
-    if dm_history:
-        lines = []
-        for msg in dm_history[:5]:
-            direction = msg.get("direction", "?")
-            text = msg.get("message_text", "")[:80]
-            lines.append(f"[{direction}] {text}")
-        dm_history_summary = "\n".join(lines)
-
-    # Build prompt
-    prompt = PromptService.get("analyze_message").format(
-        message_text=message_text[:500],
-        message_type=message_type,
-        sender_username=sender_username,
-        account_username=account_context.get("username", "unknown"),
-        account_type=account_context.get("account_type", "business"),
-        post_caption=(post_context.get("caption", "N/A")[:200] if post_context else "N/A"),
-        post_engagement=(post_context.get("engagement_rate", 0) if post_context else 0),
-        dm_history_summary=dm_history_summary,
-        customer_value=customer_lifetime_value,
-    )
-
-    # Invoke LLM via LLMService for retry/backoff coverage.
-    # No bind_tools() needed — analyze_message prompt returns structured JSON and never triggers tool calls.
-    from services.llm_service import LLMService
-    from config import llm
-    from prompts import SYSTEM_PROMPT
-
-    full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
-    raw_response = await LLMService.invoke(full_prompt, llm_instance=llm)
-
-    # Parse JSON response using the static method (lazy import to avoid circular)
-    from services.agent_service import AgentService
-    result = AgentService._parse_json_response(
-        raw_response.content if hasattr(raw_response, "content") else str(raw_response)
-    )
-
-    # Apply hard escalation rules on top of LLM decision
-    result = _apply_hard_escalation_rules(result, message_text, customer_lifetime_value)
-
-    return result
-
-
 def _apply_hard_escalation_rules(result: dict, message_text: str, customer_value: float) -> dict:
-    """Override LLM decision with hard rules for VIP, urgent, complaints."""
+    """Override LLM decision with hard rules for VIP, urgent, complaints.
+
+    This is a defense-in-depth layer. The LLM applies escalation logic via the
+    analyze_message_agent prompt first. Python overrides as a safety net for:
+    - VIP customers (LTV threshold) — always escalate regardless of LLM output
+    - Urgent keywords (even if LLM missed them)
+    - Complaint + negative sentiment combinations LLM may miss
+    - Complex multi-part questions LLM may underestimate
+    """
     lower_text = message_text.lower()
 
     # Rule 1: Urgent keywords -> priority = urgent
@@ -141,12 +75,16 @@ def _apply_hard_escalation_rules(result: dict, message_text: str, customer_value
     sentiment = result.get("sentiment", "neutral")
     if category in ESCALATION_CATEGORIES and sentiment == "negative":
         result["needs_human"] = True
-        result["escalation_reason"] = result.get("escalation_reason") or f"Negative {category} requires human"
+        result["escalation_reason"] = (
+            result.get("escalation_reason") or f"Negative {category} requires human"
+        )
 
     # Rule 4: Long complex message -> escalate
     if len(message_text) > 300 and "?" in message_text:
         result["needs_human"] = True
-        result["escalation_reason"] = result.get("escalation_reason") or "Complex multi-part question"
+        result["escalation_reason"] = (
+            result.get("escalation_reason") or "Complex multi-part question"
+        )
 
     return result
 
@@ -171,7 +109,7 @@ def _reply_to_comment(
         return {
             "success": False,
             "error": "reply_too_long",
-            "message": f"Reply exceeds {MAX_COMMENT_REPLY_LENGTH} chars ({len(reply_text)})"
+            "message": f"Reply exceeds {MAX_COMMENT_REPLY_LENGTH} chars ({len(reply_text)})",
         }
 
     job = {
@@ -215,7 +153,7 @@ def _reply_to_dm(
         return {
             "success": False,
             "error": "message_too_long",
-            "message": f"DM exceeds {MAX_DM_REPLY_LENGTH} chars ({len(message_text)})"
+            "message": f"DM exceeds {MAX_DM_REPLY_LENGTH} chars ({len(message_text)})",
         }
 
     job = {
@@ -241,26 +179,20 @@ def _reply_to_dm(
 
 
 # ================================
-# Tool Definitions
+# Tool Definitions — execution tools only
+# analyze_message_tool REMOVED (recursion loop). Use AgentService.bind_tools() path.
 # ================================
-analyze_message_tool = StructuredTool.from_function(
-    func=_analyze_message,
-    name="analyze_message",
-    description="Analyze an Instagram message (comment or DM). Returns category, sentiment, priority, suggested reply. Use before deciding to reply or escalate.",
-    args_schema=AnalyzeMessageInput,
-)
-
 reply_to_comment_tool = StructuredTool.from_function(
     func=_reply_to_comment,
     name="reply_to_comment",
-    description="Send a reply to an Instagram comment via backend proxy. Max 2200 chars. Use after analyze_message confirms auto-reply.",
+    description="Send a reply to an Instagram comment via backend proxy. Max 2200 chars. Queue-first — returns immediately.",
     args_schema=ReplyToCommentInput,
 )
 
 reply_to_dm_tool = StructuredTool.from_function(
     func=_reply_to_dm,
     name="reply_to_dm",
-    description="Send a DM reply via backend proxy. Max 150 chars. Use after analyze_message confirms auto-reply and 24h window is valid.",
+    description="Send a DM reply via backend proxy. Max 150 chars. Queue-first — returns immediately.",
     args_schema=ReplyToDMInput,
 )
 
@@ -268,8 +200,12 @@ reply_to_dm_tool = StructuredTool.from_function(
 # ================================
 # Tool Registry
 # ================================
+# NOTE: AUTOMATION_TOOLS is kept for backward compat with tools/__init__.py imports.
+# analyze_message_tool is NOT included — it caused a recursion loop when used via bind_tools().
+# _reply_to_comment and _reply_to_dm are Python-executed only, not via bind_tools().
+# Both are safe to import from here as standalone Python functions.
+# ================================
 AUTOMATION_TOOLS = [
-    analyze_message_tool,
     reply_to_comment_tool,
     reply_to_dm_tool,
 ]

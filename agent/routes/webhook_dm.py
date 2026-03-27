@@ -4,7 +4,12 @@ Instagram DM Webhook Handler
 Receives ONLY direct webhook events from Meta's Instagram Graph API.
 NOT an N8N forwarding layer — the agent is sovereign.
 
-Respects 24h messaging window before executing replies.
+New architecture: Webhook writes to Supabase only. The dm_monitor polls Supabase,
+runs AgentService.bind_tools() for analysis, checks 24h window, and executes
+replies. This separates concerns and avoids the recursion loop.
+
+Flow: Instagram → HMAC-verified POST → write to Supabase → return
+(Analysis and reply execution deferred to dm_monitor)
 
 Endpoints:
   GET  /webhook/dm - Meta verification challenge
@@ -18,7 +23,6 @@ from config import INSTAGRAM_VERIFY_TOKEN, WEBHOOK_RATE_LIMIT
 from services.validation import DMWebhookData
 from services.supabase_service import SupabaseService
 from routes.webhook_base import WebhookConfig, webhook_pipeline
-from tools.automation_tools import _reply_to_dm
 
 webhook_dm_router = APIRouter()
 
@@ -116,86 +120,28 @@ def _fetch_context(parsed: DMWebhookData) -> dict:
     }
 
 
-def _build_analysis_input(parsed: DMWebhookData, ctx: dict) -> dict:
-    """Build input for analyze_message tool."""
-    # Extract customer lifetime value if available from context
-    customer_value = 0.0
-
-    return {
-        "message_text": parsed.message_text,
-        "message_type": "dm",
-        "sender_username": parsed.sender_username or f"user_{parsed.sender_id[-6:]}",
-        "account_context": ctx.get("account", {}),
-        "post_context": None,
-        "dm_history": ctx.get("dm_history"),
-        "customer_lifetime_value": customer_value,
-    }
-
-
-def _pre_execute_check(parsed: DMWebhookData, analysis: dict) -> Optional[dict]:
-    """Check 24h window before executing DM reply.
-
-    Returns execution result dict if reply should be blocked,
-    or None if reply can proceed.
-    """
-    # Fetch fresh conversation context to verify window
-    conv_ctx = SupabaseService.get_dm_conversation_context(
-        parsed.sender_id,
-        parsed.business_account_id
-    )
-
-    within_window = conv_ctx.get("within_window", True)
-
-    if not within_window:
-        return {
-            "executed": False,
-            "reason": "outside_24h_window",
-            "message": "Cannot send DM - outside 24-hour messaging window",
-        }
-
-    return None  # Proceed with execution
-
-
 def _build_response(parsed: DMWebhookData, analysis: dict) -> dict:
-    """Build response payload."""
+    """Build response payload.
+
+    In the new architecture, analysis is empty (deferred to monitor).
+    Returns a queued-for-processing response.
+    """
     return {
         "processed": True,
+        "status": "queued_for_processing",
         "message_id": parsed.message_id,
         "sender_id": parsed.sender_id,
-        "category": analysis.get("category"),
-        "sentiment": analysis.get("sentiment"),
-        "priority": analysis.get("priority"),
-        "needs_human": analysis.get("needs_human", False),
-        "escalation_reason": analysis.get("escalation_reason"),
-        "suggested_reply": analysis.get("suggested_reply"),
-        "confidence": analysis.get("confidence", 0),
+        "source": "webhook",
     }
 
 
 def _execute_reply(parsed: DMWebhookData, analysis: dict) -> dict:
-    """Execute DM reply if analysis approves."""
-    suggested_reply = analysis.get("suggested_reply", "")
+    """Execute DM reply — NO-OP in new architecture.
 
-    if not suggested_reply:
-        return {"executed": False, "reason": "no_reply_suggested"}
-
-    # Only auto-reply if not escalated
-    if analysis.get("needs_human"):
-        return {"executed": False, "reason": "escalated_to_human"}
-
-    result = _reply_to_dm(
-        conversation_id=parsed.conversation_id,
-        recipient_id=parsed.sender_id,
-        message_text=suggested_reply,
-        business_account_id=parsed.business_account_id,
-    )
-
-    return {
-        "executed": result.get("success", False),
-        "reply_sent": suggested_reply if result.get("success") else None,
-        "execution_id": result.get("execution_id"),
-        "error": result.get("error") if not result.get("success") else None,
-    }
+    Analysis and reply execution are deferred to the dm_monitor.
+    This hook is kept to preserve the response structure but returns no-op.
+    """
+    return {"executed": False, "reason": "deferred_to_monitor"}
 
 
 def _build_audit_details(parsed: DMWebhookData, analysis: dict, exec_result: dict, latency: int) -> dict:
@@ -229,11 +175,10 @@ _config = WebhookConfig(
     get_user_id=lambda p: p.business_account_id,
     hard_rules=_hard_rules,
     fetch_context=_fetch_context,
-    build_analysis_input=_build_analysis_input,
     build_response=_build_response,
     execute_reply=_execute_reply,
     build_audit_details=_build_audit_details,
-    pre_execute_check=_pre_execute_check,
+    # pre_execute_check removed — 24h window check deferred to dm_monitor
 )
 
 

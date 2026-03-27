@@ -1,305 +1,345 @@
-# Instagram Automation Agent — Architecture Report (Updated)
+# Plan: Supabase Tools → AgentService Tool Binding Backbone
+
+## Context
+
+The supabase tools (`get_post_context`, `get_account_info`, `get_recent_comments`, `get_dm_history`, `get_dm_conversation_context`, `get_post_performance`, `log_decision`) are the data backbone of all automations. They are imported into `AgentService`'s scoped tool sets but never invoked through `bind_tools()` in production. Every pipeline calls `LLMService.invoke()` with raw `llm`, pre-fetches data in Python, and feeds it as a fixed prompt. The LLM never decides what data to fetch.
+
+The typed ID coercion bug was already fixed. The `analyze_message` recursion loop must also be resolved.
+
+**Goal:** 6 supabase read tools go through `bind_tools()`. LLM decides when to call them. Execution tools (`reply_*`) and audit logging (`log_decision`) stay Python-side. This is the foundation.
+
+**Out of scope:** content, attribution, analytics, oversight — each is a separate domain.
 
 ---
 
-## Section 1: Entry Points
+## Decisions Made
 
-Two types: HTTP Routes (31 endpoints) + Schedulers (8 background jobs).
-
-### HTTP Routes
-
-| Path | Auth | Handler |
-|------|------|---------|
-| POST /webhook/comment | HMAC | webhook_comment.process_comment_webhook() |
-| POST /webhook/dm | HMAC | webhook_dm.process_dm_webhook() |
-| POST /webhook/order-created | HMAC | webhook_order.process_order_webhook() |
-| POST /oversight/chat | API Key | oversight.chat_endpoint() |
-| POST /engagement-monitor/trigger | API Key | SchedulerService.trigger_now() |
-| POST /content-scheduler/trigger | API Key | SchedulerService.trigger_now() |
-| POST /analytics-reports/trigger-daily | API Key | SchedulerService.trigger_now() |
-| POST /queue/retry-dlq | API Key | OutboundQueue.retry_dlq() |
-| GET /health, GET /metrics | None | health/metrics handlers |
-
-### Schedulers (APScheduler AsyncIOScheduler)
-
-| Job | Schedule | Entry Function |
-|-----|----------|----------------|
-| DM Monitor | interval | dm_monitor_run() |
-| Engagement Monitor | interval | engagement_monitor_run() |
-| Content Scheduler | cron 9am/2pm/7pm | content_scheduler_run() |
-| UGC Discovery | interval | ugc_discovery_run() |
-| Analytics Daily | cron 23:00 | analytics_reports_run("daily") |
-| Analytics Weekly | cron Sun 23:00 | analytics_reports_run("weekly") |
-| Weekly Attribution Learning | cron Mon 08:00 | weekly_attribution_learning_run() |
-| Heartbeat Sender | interval | heartbeat_sender_run() |
+| # | Decision |
+|---|---|
+| Q1 | `analyze_message_tool` removed from scope (recursion). No replacement analysis tool in scope. |
+| Q2 | **Split**: Escalation logic embedded in new prompt. `_apply_hard_escalation_rules()` stays in Python as safety override. |
+| Q3 | Deferred |
+| Q4 | Deferred |
+| Q5 | Deferred |
+| Q6 | Engagement monitor first, then dm_monitor |
+| Q7 | Option C: LLM streams. Call site consumes generator, accumulates, parses, applies hard rules, routes. |
+| Q8 | **Revised**: Remove `reply_to_comment_tool` and `reply_to_dm_tool` from scope — LLM executes replies via reasoning, Python executes via `_reply_to_comment()`/`_reply_to_dm()` directly. No duplication. |
+| Q9 | Option A: All 6 supabase tools in engagement scope from the start. |
+| Webhook | Webhooks write to Supabase only. Engagement monitor's polling run processes them via `AgentService`. Webhooks no longer call `_analyze_message()`. |
+| Instance lifecycle | One `AgentService(scope="engagement")` instance per run, shared across all comments. |
+| log_decision | Removed from `ENGAGEMENT_SCOPE_TOOLS`. Python logs deterministically. No duplicates. |
 
 ---
 
-## Section 2: Middleware
+## Final `ENGAGEMENT_SCOPE_TOOLS` — 6 tools
 
-HTTP Request → CORSMiddleware → Request ID → api_key_middleware → SlowAPI Limiter → Route Handler
-
-- CORS whitelist from CORS_ALLOW_ORIGINS
-- api_key_middleware: X-API-Key check, bypassed for PUBLIC_PATHS
-- SlowAPI Limiter: Redis-backed, 60/min default, per-route overrides
+```python
+ENGAGEMENT_SCOPE_TOOLS = [
+    get_post_context,              # Post caption, likes, engagement_rate
+    get_account_info,             # Username, followers, account_type
+    get_recent_comments,           # Account-level comment patterns (NOT thread context)
+    get_dm_history,              # Prior DM messages for conversation context
+    get_dm_conversation_context,  # 24h reply window status
+    # log_decision — Python-only, no duplication
+    # analyze_message_tool — removed, recursion loop
+    # reply_to_comment_tool — removed, Python executes
+    # reply_to_dm_tool — removed, Python executes
+]
+# Total: 6 tools
+```
 
 ---
 
-## Section 3: Service Layer
+## Step 1 — Strip `_analyze_message()` (fix recursion loop)
 
-### AgentService — Tool-binding orchestration (DEAD IN PRODUCTION)
+**File:** `agent/tools/automation_tools.py`
 
-`AgentService` with scoped tool binding is **never actually used** in any production pipeline. `SCOPED_TOOLS` is defined but uninstantiated.
+`analyze_message_tool` wraps `_analyze_message()`. `_analyze_message()` calls `LLMService.invoke()`. If the LLM calls `analyze_message` through `bind_tools()`, it triggers another LLM call inside the tool — recursion loop. No tool in the scope calls `_analyze_message`, so this function is now only used by old callers during migration.
 
-**Actual callers of AgentService:**
-- None in production. All callers use direct `LLMService.invoke()` instead.
+**Changes:**
+- Remove `SYSTEM_PROMPT` import
+- Remove `llm` import from `config`
+- Remove `LLMService.invoke()` call and `AgentService._parse_json_response()` call
+- Keep `_apply_hard_escalation_rules()` as a standalone function — safety layer, applied after `AgentService` stream in the new path
+- `_analyze_message()` becomes a pure function that returns `None`. It is no longer called by the `AgentService` path. It is also no longer called by webhooks (webhooks write to Supabase only, engagement monitor processes via `AgentService`).
 
-**`ENGAGEMENT_SCOPE_TOOLS`** (6 tools: `get_post_context`, `get_account_info`, `get_recent_comments`, `log_decision`, `analyze_message`, `reply_to_comment`, `reply_to_dm`) is defined in `agent_service.py` but **never bound or called**. The engagement monitor imports `_analyze_message` (raw function) directly, not `analyze_message_tool`.
+Actually — `_analyze_message()` returning `None` would break the non-bind callers. The cleanest approach: `_analyze_message()` is NOT modified yet. The `AgentService` path does not use `_analyze_message()`. The new `analyze_message_agent` prompt replaces it. Old callers (webhooks) are being removed from calling it in this plan.
 
-**`CONTENT_SCOPE_TOOLS`** (4 tools) — dead, never used.
-**`ATTRIBUTION_SCOPE_TOOLS`** (3 tools) — dead, never used.
+Wait — webhooks currently call `_analyze_message()`. With the new architecture, webhooks write to Supabase, engagement monitor reads from Supabase via `AgentService`. So webhooks should no longer call `_analyze_message()`.
 
-### LLMService — Low-level LLM wrapper (LIVE)
+**Final decision for this step:**
+- Remove `analyze_message_tool` from `ENGAGEMENT_SCOPE_TOOLS` (removes recursion risk)
+- Remove `_analyze_message()` function entirely — it is replaced by `AgentService` + new prompt
+- Remove `_apply_hard_escalation_rules()` from `_process_comment()` in engagement_monitor and dm_monitor — these are applied by the new `_apply_hard_escalation_rules()` standalone function after `AgentService` returns
+- Actually `_apply_hard_escalation_rules()` stays — it's applied as a Python safety override in the call site
 
-Used by: `_analyze_message()`, `generate_and_evaluate()`, `evaluate_attribution()`, `generate_llm_insights()`, and `AgentService._analyze()`.
-
-```
-LLMService.invoke(prompt, llm_instance)
-    └── asyncio.to_thread(llm_instance.invoke, prompt)  — blocks thread, not event loop
-            └── ChatOllama (sync HTTP via httpx)
-    └── [on exception] _is_retryable() → exponential backoff → retry
-            Attempts: ~1.0s, ~2.5s, ~4.5s (with jitter)
-```
-
-**Retry parameters:** `base_delay=1.0`, `JITTER_RANGE=0.5`, `max_retries=3`
-**Retryable keywords (string match, not isinstance):** connection, timeout, unavailable, busy, 500, 503, 429, rate limit, model loading, econnreset, eof, broken pipe, network
-**Non-retryable:** JSON parse errors, ValidationError — raise immediately through to caller
-
-**Direct `llm.invoke()` callers (NO LLMService retry):**
-- `oversight_brain.chat()` — both passes use direct `llm.invoke()` via `asyncio.to_thread()`, NO retry, NO exponential backoff. TimeoutError caught → fallback text. Second-pass failure → falls back to first-pass text.
-- `LLMService.analyze()` — deprecated sync path, direct `llm.invoke()`, 1x instant retry only, no backoff.
-
-### SupabaseService — Data access + L1/L2 cache + tenacity retry + pybreaker
-
-```
-Method (e.g., get_post_context_by_uuid)
-    1. L1 cachetools TTLCache check (per-process singleton, 30s TTL for post_context)
-    2. L2 Redis cache_get (shared across workers, 30s TTL, sync redis client BLOCKS event loop)
-    3. execute() → tenacity (3 attempts, 0.5s/1s/2s backoff) → pybreaker (5 failures → 30s open)
-    4. On success: populate L1 + L2
-    5. On CircuitBreakerError: caught at method level, returns {} — does NOT crash pipeline
-```
-
-**Cache key fragmentation:** `get_post_context()` uses `post_ctx:{instagram_media_id}`; `get_post_context_by_uuid()` uses `post_ctx_uuid:{uuid}` — same post indexed under two keys.
-
-**NOT cached at L1 or L2:** `get_active_business_accounts()`, `get_unprocessed_comments()`, `get_recent_comments()`, all writes.
-
-**L2 Redis sync client:** `socket_timeout=2` on all Redis ops — Redis outage fails fast, doesn't block indefinitely.
-
-**Known issue:** `redis.Redis` is synchronous — all L2 cache ops block the asyncio event loop. TODO: migrate to `redis.asyncio.Redis` (redis>=5.0.1 already installed).
-
-### OutboundQueue — Durable job queue (LIVE)
-
-```
-OutboundQueue.enqueue(job)
-    1. Idempotency check via Supabase (NOT Redis) — filters out completed+dlq only
-    2. Redis LPUSH (fast path, atomic)
-    3. Supabase INSERT (fallback when Redis down)
-```
-
-**Idempotency key contract:**
-- Return `{success: True, queued: True}` → actually pushed
-- Return `{success: True, queued: False, deduplicated: True}` → deduplicated (previous job found in pending/processing/failed/scheduled)
-- Return `{success: False}` → both backends failed
-
-**BUG (HIGH):** `was_replied = result.get("success", False)` in `_handle_auto_reply()` evaluates True for deduplicated returns — comments are permanently marked "replied" in DB and audit log even when no reply was sent.
-
-**DLQ idempotency bug (HIGH):** `move_to_dlq()` does NOT clear `idempotency_key`. `retry_dlq()` resets Supabase row to `pending` then calls `enqueue()` with original key → idempotency check finds the pending row → silently returns `deduplicated: True` → retry never happens.
-
-**Supabase fallback for scheduled retries is orphaned:** `schedule_retry()` writes `status='failed'` in Supabase (not 'scheduled'). `_scheduled_retry_loop` only drains Redis `QUEUE_SCHEDULED` ZSET — Supabase fallback retry jobs are never picked up by the drain loop.
-
-### QueueWorker — Background job executor (LIVE)
-
-Three concurrent asyncio loops (independent, no fairness mechanism):
-
-```
-_high_priority_loop()    — polls QUEUE_HIGH every 0.5s
-_normal_priority_loop()  — polls QUEUE_NORMAL every 0.6s (staggered +0.1s)
-_scheduled_retry_loop()  — drains QUEUE_SCHEDULED every 30s
-```
-
-**Lock mechanism:** `SET outbound:lock:{job_id} 1 NX EX 120` — atomic mutex with 120s auto-expiry. If worker crashes after acquiring lock: lock expires, job can be re-executed by another worker.
-
-**BUG (MEDIUM):** Only `publish_post` actions get `_is_safe_to_execute()` double-protection. `reply_comment` and `reply_dm` have no guard — if worker crashes mid-execution and lock expires, duplicate HTTP call possible.
-
-**Backend 429 handling:** Respects `retry_after_seconds` from backend JSON body directly (no floor). If absent, floor of 300s applied. Immediate DLQ if `retryable: false` in response.
+**Concrete changes in `automation_tools.py`:**
+- Remove `_analyze_message()` function entirely (replaced by AgentService path)
+- Keep `_apply_hard_escalation_rules()` as a standalone function (imported and used in engagement_monitor and dm_monitor)
+- Keep `_reply_to_comment()` and `_reply_to_dm()` as-is (Python-side execution)
+- Keep `analyze_message_tool`, `reply_to_comment_tool`, `reply_to_dm_tool` definitions in `AUTOMATION_TOOLS` but they are NOT in `ENGAGEMENT_SCOPE_TOOLS` and NOT used in the new `AgentService` path
 
 ---
 
-## Section 4: Tool Taxonomy
+## Step 2 — Scope definitions
 
-### LangChain StructuredTools (12 total, ALL DEAD — never bound in production)
+**File:** `agent/services/agent_service.py`
 
-**SUPABASE_TOOLS (7):** Pure `SupabaseService` wrappers. Never called via `bind_tools()` in any live path.
-
-**AUTOMATION_TOOLS (3):**
-- `_analyze_message()` → `LLMService.invoke()` directly, no `bind_tools()`, no tool calling
-- `_reply_to_comment()` → `OutboundQueue.enqueue()` only
-- `_reply_to_dm()` → `OutboundQueue.enqueue()` only
-
-**OVERSIGHT_TOOLS (2):** Audit-log queries. Never bound via `AgentService` in live paths.
-
-### Internal Pipeline Functions (NOT LangChain tools, called directly)
-
-`content_tools.py`: `select_asset`, `generate_and_evaluate`, `publish_post`
-`attribution_tools.py`: `detect_all_signals`, `classify_signal_strategy`, `evaluate_attribution`, `build_customer_journey`, `calculate_multi_touch_models`
-`analytics_tools.py`: `collect_instagram_data`, `aggregate_metrics`, `generate_recommendations`, `generate_llm_insights`
-`ugc_tools.py`: `score_ugc_quality`, `fetch_hashtag_media`, `send_permission_dm`
-`live_fetch_tools.py`: `fetch_live_comments`, `fetch_live_conversations`, `trigger_repost_ugc`
-
----
-
-## Section 5: Tool Calling Mechanics
-
-### How `llm.bind_tools()` Works (LangChain)
-
-`ChatOllama.bind_tools(tool_list)` serializes each `StructuredTool` (name + description + Pydantic args_schema) into a JSON object injected into the message history as `{"type": "function", "function": {...}}`. The tool schema is part of the prompt — not a separate API call.
-
-When Ollama decides to call a tool, it emits an `AIMessage` with a `tool_calls` attribute (list of `{name, args}` dicts). LangChain deserializes arguments via the tool's Pydantic `args_schema` at `tool.invoke()` time.
-
-### Two-Pass Flow (in AgentService._analyze — DEAD)
-
-```
-Pass 1: LLMService.invoke(full_prompt, llm_with_tools)
-    ├── No tool_calls → parse content as JSON → return
-    └── Has tool_calls → _execute_tool_calls_async() in parallel
-                              └── asyncio.wait_for(tool.invoke(), timeout=5s) per tool
-                              └── Tool timeout → {"error": "timeout"} dict returned
-                              └── Tool exception → {"error": str(e)} dict returned
-                         → Pass 2: LLMService.invoke(enriched_prompt, llm_with_tools)
-                              └── _build_enriched_prompt() prepends original prompt + appends tool results
-                              └── parse final JSON
+**`ENGAGEMENT_SCOPE_TOOLS`** — 6 tools:
+```python
+ENGAGEMENT_SCOPE_TOOLS = [
+    get_post_context,
+    get_account_info,
+    get_recent_comments,
+    get_dm_history,
+    get_dm_conversation_context,
+    # log_decision — Python-only
+]
 ```
 
-**`_build_enriched_prompt()` injects:** Raw `json.dumps(output, default=str)` for each tool result directly into the prompt. **Prompt injection risk:** Tool outputs (which may contain user-controlled text like comment content) are not sanitized — re-injected verbatim into LLM context.
+**Imports:** Keep `get_dm_history` and `get_dm_conversation_context` in the import from `tools.supabase_tools`. Remove `analyze_message_tool`, `reply_to_comment_tool`, `reply_to_dm_tool` from the automation tools import — they are no longer in any scope.
 
-### Tool Timeout Isolation
-
-`asyncio.gather(*tasks, return_exceptions=True)` — a timeout on one tool does NOT fail the batch. The timeout returns `{"error": "timeout"}` dict, which is passed to the second-pass LLM. The LLM is informed of the failure rather than the call crashing.
-
----
-
-## Section 6: Engagement Monitor Pipeline (LIVE)
-
-```
-engagement_monitor_run()
-  └─ _process_account()
-       └─ _process_comment_safe() [semaphore-wrapped, error-isolated]
-            └─ _process_comment()
-                 ├─ get_post_context_by_uuid()        → L1 → L2 → tenacity → Supabase
-                 ├─ _analyze_message()                 → LLMService.invoke() direct, no bind_tools
-                 │      └─ SYSTEM_PROMPT + analyze_message prompt (pre-injected context)
-                 │      └─ LLM → structured JSON
-                 │      └─ _apply_hard_escalation_rules() — 4 rules (urgent/VIP/complaint/complex)
-                 ├─ route:
-                 │    needs_human=True       → _handle_escalation()
-                 │    suggested_reply+conf   → _handle_auto_reply()  [BUG: was_replied check]
-                 │    else                   → _handle_skip()
-                 ├─ mark_comment_processed()         → Supabase write
-                 ├─ DedupService.mark_processed()    → Redis SET
-                 └─ log_decision()                  → audit_log INSERT
+**`CONTENT_SCOPE_TOOLS`** — unchanged:
+```python
+CONTENT_SCOPE_TOOLS = [
+    get_post_context,
+    get_account_info,
+    get_post_performance,
+    log_decision,
+]
 ```
 
-**Dedup: Redis SET `engagement_monitor:processed_ids:{account_id}` TTL 24h + `processed_by_automation=True` column.**
-
-**BUG (HIGH):** `_handle_auto_reply()` marks comment processed BEFORE verifying queue enqueue succeeded. If `OutboundQueue.enqueue()` returns `success=False`, the comment is permanently lost — marked processed in DB + Redis, never retried.
-
-**BUG (MEDIUM):** `execution_id` field in audit log always null — field name wrong (`job_id` is the actual identifier, but true execution tracking requires querying the QueueWorker's in-flight state).
-
----
-
-## Section 7: Engagement Monitor vs Webhook Pipeline Differences
-
-| Aspect | Comment Webhook | Engagement Monitor |
-|--------|----------------|-------------------|
-| Dedup write-through | `processed_by_automation=True` set BEFORE log_decision (correct) | Set AFTER routing in action handlers (race window) |
-| Execution outcome logging | None | `_log_execution_outcome()` per reply |
-| Error events | Propagates to 503 | `engagement_monitor_comment_error` logged |
-| Event types | `webhook_comment_processed` | `engagement_monitor_escalation` / `engagement_monitor_comment_processed` |
-| Comment ID to audit | Instagram numeric ID | Supabase UUID |
+**`ATTRIBUTION_SCOPE_TOOLS`** — unchanged:
+```python
+ATTRIBUTION_SCOPE_TOOLS = [
+    get_dm_history,
+    get_account_info,
+    log_decision,
+]
+```
 
 ---
 
-## Section 8: Known Issues Ranked by Severity
+## Step 3 — New prompt for bind_tools analysis path
 
-### CRITICAL
+**File:** `agent/prompts.py`
 
-1. **DLQ Retry Silently Dropped** (`outbound_queue.py` + `queue_routes.py`)
-   `move_to_dlq()` does not clear `idempotency_key`. `retry_dlq()` resets to `pending` then calls `enqueue()` with same key. Idempotency check finds the `pending` row → returns `deduplicated: True` → retry never happens.
-   **Fix:** Clear `idempotency_key` in `move_to_dlq()` OR change deduplication query to `status == 'pending'` as the active guard.
+New prompt key: `analyze_message_agent`
 
-2. **Comment Permanently Lost on Queue Failure** (`engagement_monitor.py`)
-   `_handle_auto_reply()` calls `mark_comment_processed()` + `DedupService.mark_processed()` regardless of queue enqueue result. `OutboundQueue.enqueue()` returning `success=False` → comment permanently unretried.
-   **Fix:** Only mark processed if `result.get("success") and result.get("queued")`.
+The prompt must instruct the LLM precisely on each tool's purpose:
 
-### HIGH
+```
+You are an Instagram engagement analyzer. You have access to these tools.
 
-3. **Deduplication Misclassified as Success** (`engagement_monitor.py` + `automation_tools.py`)
-   `was_replied = result.get("success", False)` is True for deduplicated returns. DB `was_replied` column and audit log permanently wrong for deduplicated comments.
-   **Fix:** Check `result.get("queued") == True` as authoritative flag.
+TOOL PURPOSE (use in this order):
+- get_post_context(post_id) — "Get the post this comment is on: caption, likes, comments, engagement_rate, media_type."
+- get_account_info(business_account_id) — "Get the account context: username, name, account_type, followers_count."
+- get_recent_comments(business_account_id, limit) — "Get the ACCOUNT's recent comment patterns: typical categories, sentiment, engagement quality. Use limit=5. This tells you what kinds of replies this account usually gets — NOT the thread around this specific comment."
+- get_dm_history(business_account_id, customer_instagram_id, limit) — "Get prior DM messages for this sender. Use when analyzing a DM or when you need conversation history."
+- get_dm_conversation_context(business_account_id, customer_instagram_id) — "Check if the 24-hour reply window is still open for this DM sender."
 
-4. **Oversight Brain Has No Retry Protection** (`oversight_brain.py`)
-   Both passes use direct `llm.invoke()` via `asyncio.to_thread()`. No `LLMService.invoke()` wrapping. No exponential backoff. A transient Ollama timeout falls back to text without retry. Second-pass failure falls back to first-pass text.
-   **Fix:** Route through `LLMService.invoke()` for both passes.
+TASK: Analyze the message below. Fetch context using tools as needed.
 
-### MEDIUM
+MESSAGE:
+{message_text}
 
-5. **Reply Comment/DM Race Condition** (`queue_worker.py`)
-   No `_is_safe_to_execute()` guard for `reply_comment`/`reply_dm`. Worker crash mid-execution + 120s lock expiry → duplicate HTTP call possible.
-   **Fix:** Add `_is_safe_to_execute()` guard for all action types, or use job state machine.
+Analyze and return JSON with:
+{
+  "category": "general | product_question | complaint | praise | spam | inquiry | ...",  "sentiment": "positive | neutral | negative",
+  "priority": "low | medium | high | urgent",
+  "intent": "one-line description of what the sender wants",
+  "confidence": 0.0-1.0,
+  "needs_human": true/false,  "escalation_reason": "if needs_human=true, explain why",
+  "suggested_reply": "if not needs_human, write the reply text"
+}
 
-6. **Supabase Scheduled Retry Jobs Orphaned** (`outbound_queue.py`)
-   `schedule_retry()` writes `status='failed'` in Supabase. `_scheduled_retry_loop` only drains Redis ZSET. Jobs enqueued during Redis outage and later retried via Supabase path are never drained back to Redis.
-   **Fix:** Add a `drain_supabase_scheduled()` that queries `status='failed'` AND `next_retry_at < now()` and re-enqueues them.
+ESCALATION RULES (apply these first):
+- If the message contains urgent keywords (refund, cancel, broken, emergency, urgent, help) → needs_human=true
+- If the message sentiment is negative AND category is complaint → needs_human=true
+- If the message is longer than 300 chars AND contains a question mark → needs_human=true
+- If the suggested reply is empty → needs_human=true
 
-7. **Post Context Cache Fragmentation** (`supabase_service/_engagement.py`)
-   `get_post_context()` and `get_post_context_by_uuid()` cache the same data under different keys. Engagement monitor only uses `get_post_context_by_uuid()` — misses any cache entries from other callers using `get_post_context()`.
-   **Fix:** Unify to single cache key scheme using `instagram_media_id` as canonical key.
+After applying escalation rules, output the final JSON.
+```
 
-8. **Sync Redis Client Blocks Event Loop** (`supabase_service/_infra.py`)
-   `redis.Redis` is synchronous — all L2 cache operations (get, set, setex) block the asyncio event loop. With up to 3 concurrent engagement analyses, L2 cache misses cause event loop stalls.
-   **Fix:** Migrate to `redis.asyncio.Redis` (already in requirements as redis>=5.0.1).
-
-### LOW
-
-9. **`SCOPED_TOOLS` Is Dead Infrastructure** (`agent_service.py`)
-   `ENGAGEMENT_SCOPE_TOOLS`, `CONTENT_SCOPE_TOOLS`, `ATTRIBUTION_SCOPE_TOOLS` defined but never instantiated in production. All engagement/content/attribution pipelines use direct `LLMService.invoke()` without `bind_tools()`.
-   **Fix:** Either remove (if not planning to use) or wire up actual `AgentService(scope="engagement")` paths.
-
-10. **`_is_retryable` String Matching Risks** (`llm_service.py`)
-    Pure string match on `str(error)`. `"connection"` and `"network"` are broad — any exception whose message contains these substrings (even indirectly) triggers retry. No `isinstance()` dispatch.
-    **Fix:** Add exception-type dispatch for specific known exception types before falling back to string match.
-
-11. **Prompt Injection Vector via Tool Output** (`agent_service.py`)
-    `_build_enriched_prompt()` injects raw `json.dumps(output)` into LLM prompt without sanitization. User-controlled text (comment text, usernames) re-injected verbatim. A carefully crafted comment could influence JSON output format.
-    **Fix:** Escape or structure tool outputs before injection, or use a separate tool-result schema that constrains output format.
-
-12. **Dedup Circuit Breaker Gap** (`outbound_queue.py`)
-    If circuit breaker is OPEN during idempotency check, `get_outbound_job_by_idempotency_key()` returns `{}`. Enqueue proceeds without deduplication check — potential duplicate.
-    **Fix:** On `CircuitBreakerError` in idempotency check, fail-safe: return `success=False` (don't enqueue) rather than bypassing the check.
-
-13. **Confusing Metric Label Transform** (`engagement_monitor.py`)
-    `"error"` → `"errors"` dict key transform in Prometheus metric loop is obfuscated.
-    **Fix:** Use consistent naming throughout.
+`_apply_hard_escalation_rules()` in Python still runs as a safety override after the LLM response.
 
 ---
 
-## Section 9: LLM Invocation Patterns — Summary
+## Step 4 — Migrate `engagement_monitor`
 
-| Pattern | Used By | Retry | Tool Binding |
-|---------|---------|-------|-------------|
-| `LLMService.invoke()` direct | `_analyze_message()`, content_tools, attribution_tools, analytics_tools | Yes (exponential backoff) | None |
-| `AgentService._analyze()` | None (dead) | Yes (via LLMService) | Yes (7-3 tools) |
-| `AgentService._astream()` | None (dead) | Yes (inline retry in `_stream_pass`) | Yes |
-| `OversightBrain.chat()` | None (oversight_brain.py uses direct `llm.invoke()`) | **No** | Custom `<<TOOL_CALL>>` markers |
-| `LLMService.analyze()` | None (deprecated) | 1x instant retry | None |
+**File:** `agent/scheduler/engagement_monitor.py`
+
+**New instance lifecycle:** One `AgentService` instance per run, shared across all accounts and all comments:
+
+```python
+async def engagement_monitor_run():
+    run_id = str(uuid_mod.uuid4())
+    start = time.time()
+    stats = {"processed": 0, "replied": 0, "escalated": 0, "skipped": 0, "errors": 0}
+
+    # One AgentService instance per run — shared across all accounts
+    agent = AgentService(scope="engagement")
+
+    accounts = SupabaseService.get_active_business_accounts()
+    for account in accounts:
+        account_stats = await _process_account(run_id, account, agent)
+        ...
+```
+
+**New `_process_comment()` with `AgentService`:**
+
+Current flow:
+```
+get_post_context_by_uuid(media_id)     ← Python pre-fetch (REMOVED)
+get_account_info(account_id)           ← Python pre-fetch (REMOVED)
+_analyze_message(...)                  ← LLMService.invoke (REMOVED)
+_apply_hard_escalation_rules()        ← Python safety overrides (KEEP)
+route: escalate / auto-reply / skip
+```
+
+New flow:
+```python
+async def _process_comment(run_id, comment, account, agent):
+    # Build prompt — NO pre-fetched context
+    # The LLM will call get_post_context, get_account_info via bind_tools()
+    prompt = _build_agent_prompt(comment, account)
+    # agent is the shared AgentService instance
+
+    # Accumulate streaming response
+    accumulated = ""
+    async for chunk in agent.astream_analyze(prompt):
+        accumulated += chunk
+
+    # Parse JSON from accumulated text
+    from services.agent_service import AgentService
+    result = AgentService._parse_json_response(accumulated)
+
+    # Python safety override — run after LLM response
+    from tools.automation_tools import _apply_hard_escalation_rules
+    result = _apply_hard_escalation_rules(result, comment["text"], 0.0)
+
+    # Route — same logic as before
+    if result.get("needs_human"):
+        return _handle_escalation(...)
+    elif result.get("suggested_reply") and result.get("confidence", 0) >= threshold:
+        return _handle_auto_reply(...)
+    else:
+        return _handle_skip(...)
+```
+
+**New `_build_agent_prompt()` helper in `engagement_monitor.py`:**
+```python
+def _build_agent_prompt(comment: dict, account: dict) -> str:
+    return PromptService.get("analyze_message_agent").format(
+        message_text=comment.get("text", ""),
+        message_type="comment",
+        sender_username=comment.get("author_username", ""),
+        account_id=account.get("id", ""),
+        media_id=comment.get("id", ""),
+    )
+```
+
+**Handler changes:**
+- `_handle_auto_reply()` — stays unchanged, calls `_reply_to_comment()` from `automation_tools`
+- `_handle_escalation()` — stays unchanged
+- `_handle_skip()` — stays unchanged
+- State management (`mark_comment_processed`, `DedupService.mark_processed`) — stays unchanged
+- Audit logging (`log_decision`) — stays in Python, NOT via `AgentService` tools
+
+---
+
+## Step 5 — Migrate `dm_monitor`
+
+**File:** `agent/scheduler/dm_monitor.py`
+
+Mirror `engagement_monitor` exactly:
+
+```python
+async def dm_monitor_run():
+    agent = AgentService(scope="engagement")  # shared per run
+
+    accounts = SupabaseService.get_active_business_accounts()
+    for account in accounts:
+        account_stats = await _process_account(run_id, account, agent)
+        ...
+
+async def _process_message(run_id, msg, account, agent):
+    prompt = _build_agent_prompt(msg, account, message_type="dm")
+
+    accumulated = ""
+    async for chunk in agent.astream_analyze(prompt):
+        accumulated += chunk
+
+    result = AgentService._parse_json_response(accumulated)
+    result = _apply_hard_escalation_rules(result, msg["message_text"], 0.0)
+
+    # Route — same logic as before
+    if result.get("needs_human"):
+        return _handle_escalation(...)
+    elif result.get("suggested_reply") and result.get("confidence", 0) >= threshold:
+        return _handle_auto_reply(...)
+    else:
+        return _handle_skip(...)
+```
+
+**DM-specific prompt additions:**
+The `_build_agent_prompt()` function for DM should include `customer_instagram_id` so the LLM can call `get_dm_history(customer_instagram_id)` and `get_dm_conversation_context(customer_instagram_id)`.
+
+---
+
+## Step 6 — Webhook cleanup
+
+**Files:** `agent/routes/webhook_comment.py`, `agent/routes/webhook_dm.py`
+
+Current behavior: webhooks write to Supabase, then call `_analyze_message()` directly.
+
+New behavior: webhooks write to Supabase only. The engagement monitor (which polls Supabase) processes the records via `AgentService`.
+
+**Changes in `webhook_comment.py` and `webhook_dm.py`:**
+- Remove import of `_analyze_message` from `automation_tools`
+- Remove the `_analyze_message()` call from the webhook pipeline
+- Webhook pipeline becomes: write to Supabase → return response → done
+- The engagement monitor's next poll picks up the new records
+
+This simplifies the webhook routes significantly — they are pure DB write operations now.
+
+---
+
+## Files to Modify
+
+| File | Changes |
+|------|---------|
+| `agent/services/agent_service.py` | Update `ENGAGEMENT_SCOPE_TOOLS` to 6 tools. Remove `analyze_message_tool`, `reply_to_comment_tool`, `reply_to_dm_tool` from imports. |
+| `agent/tools/automation_tools.py` | Remove `_analyze_message()` function entirely. Keep `_apply_hard_escalation_rules()`, `_reply_to_comment()`, `_reply_to_dm()` as standalone functions. |
+| `agent/scheduler/engagement_monitor.py` | Add `AgentService` import. Create one `agent = AgentService(scope="engagement")` per run. New `_build_agent_prompt()` helper. Replace `_process_comment()` to use `agent.astream_analyze()`, accumulate, parse, apply hard rules, route. Keep handlers and state management. |
+| `agent/scheduler/dm_monitor.py` | Same pattern as engagement_monitor. |
+| `agent/routes/webhook_comment.py` | Remove `_analyze_message()` call. Pipeline writes to Supabase only. |
+| `agent/routes/webhook_dm.py` | Remove `_analyze_message()` call. Pipeline writes to Supabase only. |
+| `agent/prompts.py` | New prompt `analyze_message_agent` with explicit tool purpose instructions and escalation rules. |
+
+---
+
+## Files NOT Modified
+
+| File | Reason |
+|------|--------|
+| `agent/tools/supabase_tools.py` | No changes needed |
+| `agent/tools/content_tools.py` | Separate migration |
+| `agent/tools/attribution_tools.py` | Separate migration |
+| `agent/tools/analytics_tools.py` | Separate migration |
+| `agent/services/oversight_brain.py` | Separate domain |
+| `agent/tools/oversight_tools.py` | Separate domain |
+
+---
+
+## Verification
+
+1. **Scope check:** `python -c "from services.agent_service import AgentService; a = AgentService(scope='engagement'); print(list(a._tool_map.keys()))"` → shows 6 tool names
+2. **No analyze_message in scope:** `python -c "from services.agent_service import AgentService; a = AgentService(scope='engagement'); assert 'analyze_message' not in a._tool_map"` → passes
+3. **No recursion:** `python -c "from tools.automation_tools import _reply_to_comment; print('ok')"` → `_reply_to_comment` is standalone, no LLM call
+4. **Stream accumulation:** Post a test comment → engagement monitor calls `agent.astream_analyze()`, accumulates tokens, parses JSON, applies `_apply_hard_escalation_rules()`, routes
+5. **One instance per run:** Logs show `AgentService initialized (scope=engagement, tools=6)` once per engagement_monitor_run cycle, not once per comment
+6. **Webhook simplification:** Webhook writes to Supabase, returns immediately, engagement monitor picks it up on next poll
+7. **Dedup preserved:** `DedupService.mark_processed()` still called after each comment — unchanged
+8. **Metrics:** `TOOL_CALLS` increments for `get_post_context`, `get_account_info`, `get_recent_comments`, `get_dm_history`, `get_dm_conversation_context` when called through `bind_tools()`

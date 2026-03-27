@@ -46,22 +46,22 @@ from tools.supabase_tools import (
     get_post_performance,
     log_decision,
 )
-from tools.automation_tools import (
-    analyze_message_tool,
-    reply_to_comment_tool,
-    reply_to_dm_tool,
-)
+# automation_tools removed from scope — analyze_message_tool recurses (calls LLM),
+# reply_to_comment_tool/reply_to_dm_tool are Python-executed (OutboundQueue).
+# log_decision removed from ENGAGEMENT_SCOPE_TOOLS — Python logs deterministically
+# to avoid duplicate audit entries. Python calls SupabaseService.log_decision directly.
 
 ENGAGEMENT_SCOPE_TOOLS = [
-    # Supabase read tools needed for engagement analysis
-    get_post_context,
-    get_account_info,
-    get_recent_comments,
-    log_decision,
-    # Automation execution tools
-    analyze_message_tool,
-    reply_to_comment_tool,
-    reply_to_dm_tool,
+    # Supabase read tools — LLM decides when to call each via bind_tools()
+    get_post_context,              # Post caption, likes, engagement_rate
+    get_account_info,             # Username, followers, account_type
+    get_recent_comments,           # Account-level comment pattern context
+    get_dm_history,               # Prior DM messages for sender context
+    get_dm_conversation_context,   # 24h reply window status for DM
+    # log_decision — Python-only logging (no duplication)
+    # analyze_message_tool — removed (recursion loop)
+    # reply_to_comment_tool — removed (Python executes via _reply_to_comment())
+    # reply_to_dm_tool — removed (Python executes via _reply_to_dm())
 ]
 
 CONTENT_SCOPE_TOOLS = [
@@ -156,9 +156,10 @@ class AgentService:
         async def _stream_pass(prompt_text: str, pass_label: str):
             """Stream a single pass with exponential-backoff retry.
 
-            Yields text chunks to the outer caller in real time.
-            Returns the accumulated AIMessageChunk so the caller can read tool_calls.
+            Accumulates chunks internally and returns both the chunk list
+            and the final AIMessageChunk (for tool_calls detection).
             """
+            chunks: list[str] = []
             accumulated = None
 
             for attempt in range(LLMService.DEFAULT_MAX_RETRIES):
@@ -166,7 +167,7 @@ class AgentService:
                     async for chunk in self.llm_with_tools.astream(prompt_text):
                         text = chunk.content if hasattr(chunk, "content") else ""
                         if text:
-                            yield text
+                            chunks.append(text)
                         accumulated = chunk if accumulated is None else accumulated + chunk
                     break  # success — exit retry loop
 
@@ -190,14 +191,17 @@ class AgentService:
                         f"{LLMService.DEFAULT_MAX_RETRIES}), retrying in {delay:.1f}s: {e}"
                     )
                     await asyncio.sleep(delay)
+                    chunks = []
                     accumulated = None  # reset — stream restarts from beginning
 
-            # Return accumulated so caller can read tool_calls
-            return accumulated
+            return chunks, accumulated
 
         # ─── Pass 1 ────────────────────────────────────────────────────────────
         try:
-            accumulated = await _stream_pass(full_prompt, "pass-1")
+            chunks, accumulated = await _stream_pass(full_prompt, "pass-1")
+            for chunk_text in chunks:
+                yield chunk_text
+
             tool_calls = getattr(accumulated, "tool_calls", []) if accumulated else []
 
             # ─── Tool execution ───────────────────────────────────────────────
@@ -226,7 +230,9 @@ class AgentService:
                 # ─── Pass 2 ─────────────────────────────────────────────────
                 if tool_outputs:
                     enriched_prompt = self._build_enriched_prompt(full_prompt, tool_outputs)
-                    await _stream_pass(enriched_prompt, "pass-2")
+                    pass2_chunks, _ = await _stream_pass(enriched_prompt, "pass-2")
+                    for chunk_text in pass2_chunks:
+                        yield chunk_text
 
         except Exception as e:
             latency_ms = int((time.time() - start_time) * 1000)
