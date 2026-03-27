@@ -12,6 +12,7 @@ Caching via: post_context_cache, account_info_cache, cache_get, cache_set from _
 from datetime import datetime, timezone, timedelta
 from pybreaker import CircuitBreakerError
 
+from services.ids import InstagramId, SupabaseUUID, verify_id_space
 from ._infra import (
     execute,
     cache_get,
@@ -31,12 +32,17 @@ class EngagementService:
     # READ: Post Context
     # ─────────────────────────────────────────
     @staticmethod
-    def get_post_context(post_id: str) -> dict:
+    def get_post_context(post_id: InstagramId) -> dict:
         """Fetch post caption and engagement metrics from instagram_media.
 
         Caching: L1 (30s TTL) → L2 Redis (30s TTL) → Supabase
         engagement_rate is COMPUTED: (likes + comments) / reach
+
+        Args:
+            post_id: InstagramId — Meta/Instagram media ID (e.g. "17841475450533073_1234567890").
+                     NOT a Supabase UUID. Use get_post_context_by_uuid() for UUID lookups.
         """
+        post_id = verify_id_space(post_id, InstagramId)
         if not supabase or not post_id:
             return {}
 
@@ -359,12 +365,17 @@ class EngagementService:
     # READ: Post Context by UUID
     # ─────────────────────────────────────────
     @staticmethod
-    def get_post_context_by_uuid(media_uuid: str) -> dict:
+    def get_post_context_by_uuid(media_uuid: SupabaseUUID) -> dict:
         """Fetch post context using Supabase UUID (not Instagram media ID).
 
         Queries by instagram_media.id (UUID), unlike get_post_context which
         queries by instagram_media_id. Shared cache with get_post_context.
+
+        Args:
+            media_uuid: SupabaseUUID — Supabase primary key UUID.
+                        NOT a Meta/Instagram media ID. Use get_post_context() for IG media IDs.
         """
+        media_uuid = verify_id_space(media_uuid, SupabaseUUID)
         if not supabase or not media_uuid:
             return {}
 

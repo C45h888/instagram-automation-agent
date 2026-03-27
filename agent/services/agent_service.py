@@ -1,17 +1,17 @@
 """
 Agent Service
 ==============
-Lightweight LLM+tools layer using llm.bind_tools() (NOT AgentExecutor).
-Single-pass: LLM receives tools -> may call them -> we execute -> return result.
+Streaming LLM+tools layer using llm.bind_tools() (NOT AgentExecutor).
+Streams tokens to the caller; detects tool calls in accumulated response,
+executes tools in parallel, then streams the final answer with results injected.
 
 Features:
   - asyncio.Semaphore to limit concurrent Ollama inferences
-  - ChatOllama with sync invoke() wrapped in asyncio.to_thread()
+  - ChatOllama astream() with exponential-backoff retry (via LLMService helpers)
   - Parallel tool execution via asyncio.gather()
   - Per-tool timeout with graceful fallback
 
-Upgrade path: If multi-step reasoning is needed later, swap to AgentExecutor.
-The tools and prompts are already compatible.
+Entry point: astream_analyze() — the only public method.
 """
 
 import asyncio
@@ -85,7 +85,12 @@ SCOPED_TOOLS = {
 
 
 class AgentService:
-    """Invoke LLM with bound tools for context-aware analysis and automation.
+    """Streaming LLM invocations with bound tools and per-call tool execution.
+
+    Entry point: astream_analyze() — streams tokens to the caller while
+    detecting tool calls in the accumulated response. Tools execute in
+    parallel via _execute_tool_calls_async(), then a second streaming pass
+    delivers the final answer with tool results injected.
 
     Args:
         scope: One of "engagement", "content", "attribution". Takes precedence
@@ -112,16 +117,6 @@ class AgentService:
             f"{list(self._tool_map.keys())}"
         )
 
-    async def analyze_async(self, prompt: str) -> dict:
-        """Async entry point with semaphore-limited concurrency.
-
-        Uses ChatOllama.invoke() wrapped in asyncio.to_thread().
-        Tools execute in parallel via asyncio.gather().
-        At most MAX_CONCURRENT_LLM inferences run simultaneously.
-        """
-        async with _llm_semaphore:
-            return await self._analyze(prompt)
-
     async def astream_analyze(self, prompt: str, on_event=None):
         """Async streaming entry point with semaphore-limited concurrency.
 
@@ -135,57 +130,6 @@ class AgentService:
         async with _llm_semaphore:
             async for chunk in self._astream(prompt, on_event=on_event):
                 yield chunk
-
-    async def _analyze(self, prompt: str) -> dict:
-        """Async LLM invocation with parallel tool execution.
-
-        Flow:
-          1. Send prompt to LLM with tools bound (retry via LLMService.invoke)
-          2. If LLM requests tool calls, execute them in parallel
-          3. If tools were called, do follow-up invoke with results (retry via LLMService.invoke)
-          4. Parse final response as JSON
-
-        Returns dict with parsed result or error info.
-        """
-        start_time = time.time()
-
-        try:
-            # Prepend system prompt for consistent behavior
-            full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
-
-            # Step 1: Invoke LLM with tools (retry via LLMService.invoke)
-            result = await LLMService.invoke(full_prompt, llm_instance=self.llm_with_tools)
-            tool_calls = getattr(result, "tool_calls", [])
-
-            # Step 2: Execute tool calls in parallel if any
-            tool_outputs = {}
-            if tool_calls:
-                tool_outputs = await self._execute_tool_calls_async(tool_calls)
-
-                # If tools were called, do a follow-up invoke with tool results as context (retry via LLMService.invoke)
-                if tool_outputs:
-                    enriched_prompt = self._build_enriched_prompt(full_prompt, tool_outputs)
-                    result = await LLMService.invoke(enriched_prompt, llm_instance=self.llm_with_tools)
-
-            latency_ms = int((time.time() - start_time) * 1000)
-
-            # Step 3: Parse response
-            raw_text = result.content if hasattr(result, "content") else str(result)
-            parsed = self._parse_json_response(raw_text)
-            parsed["_latency_ms"] = latency_ms
-            parsed["_tools_called"] = list(tool_outputs.keys()) if tool_outputs else []
-
-            return parsed
-
-        except Exception as e:
-            latency_ms = int((time.time() - start_time) * 1000)
-            logger.error(f"AgentService analysis failed (latency={latency_ms}ms): {e}")
-            LLM_ERRORS.labels(error_type="agent_execution_failed").inc()
-            return {
-                "error": "agent_execution_failed",
-                "message": str(e),
-                "_latency_ms": latency_ms,
-            }
 
     async def _astream(self, prompt: str, on_event=None):
         """Async streaming LLM invocation with tool support and retry.
@@ -358,7 +302,3 @@ class AgentService:
         """Parse JSON from LLM response. Delegates to LLMService._parse_json_response."""
         return LLMService._parse_json_response(raw)
 
-    # Backward compatibility: sync wrapper for tests
-    def analyze(self, prompt: str) -> dict:
-        """Sync wrapper - runs async analyze in new event loop."""
-        return asyncio.run(self.analyze_async(prompt))

@@ -2,7 +2,7 @@
 Infrastructure — Shared Plumbing for the Supabase Service Package
 ================================================================
 All domain modules import from here. Nothing in this file contains
-business logic — only: imports, caches, Redis, circuit breaker, and helpers.
+business logic — only: imports, caches, Redis, circuit breaker, helpers, and decorators.
 
 Changes here propagate to every module automatically.
 """
@@ -11,6 +11,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from functools import wraps
 
 import redis
 from cachetools import TTLCache
@@ -19,6 +20,40 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from config import supabase, logger
 from metrics import DB_QUERY_COUNT, CACHE_HITS, CACHE_MISSES
+
+
+# ================================
+# Return Type Enforcement Decorator
+# ================================
+def enforce_return(return_type):
+    """Decorator that asserts the return value matches the annotated return type.
+
+    Raises TypeError if the function returns None when a dict/list is annotated,
+    or returns the wrong type. This prevents silent {} returns from propagating
+    to the LLM when a Supabase query returns no rows.
+
+    Usage:
+        @enforce_return(dict)
+        def get_post_context(post_id: str) -> dict:
+            ...
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
+            if result is None:
+                raise TypeError(
+                    f"{func.__name__} returned None — expected {return_type.__name__}. "
+                    f"This usually means a Supabase query returned no rows. "
+                    f"Add an explicit 'if not result.data: return {{}}' check."
+                )
+            if not isinstance(result, return_type):
+                raise TypeError(
+                    f"{func.__name__} returned {type(result).__name__} — expected {return_type.__name__}"
+                )
+            return result
+        return wrapper
+    return decorator
 
 
 # ================================

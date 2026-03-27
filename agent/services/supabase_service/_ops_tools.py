@@ -13,9 +13,11 @@ Note on log_decision:
 
 from langchain_core.tools import tool
 
+from services.supabase_service._infra import enforce_return
 from ._ops import OpsService
 
 
+@enforce_return(dict)
 @tool("Log an agent decision to the audit_log table. Returns success status and "
       "the audit log row ID which can be used to look up this decision later. "
       "Always log decisions for traceability before taking action.")

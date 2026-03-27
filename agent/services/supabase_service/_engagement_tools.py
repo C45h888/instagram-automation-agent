@@ -18,20 +18,24 @@ Pattern:
 
 from langchain_core.tools import tool
 
+from services.ids import InstagramId, SupabaseUUID
+from services.supabase_service._infra import enforce_return
 from ._engagement import EngagementService
 
 
+@enforce_return(dict)
 @tool("Fetch post details from instagram_media: caption, like_count, comments_count, "
       "engagement_rate, media_type. Use when evaluating a comment reply or post.")
-def get_post_context(post_id: str) -> dict:
+def get_post_context(post_id: InstagramId) -> dict:
     """Fetch post context from instagram_media.
 
     Args:
-        post_id: Instagram media ID to fetch context for (not the Supabase UUID)
+        post_id: InstagramId — Instagram media ID to fetch context for (not the Supabase UUID)
     """
     return EngagementService.get_post_context(post_id)
 
 
+@enforce_return(dict)
 @tool("Fetch business account info: username, name, account_type, followers_count, "
       "biography, category. Use to understand brand voice and context.")
 def get_account_info(business_account_id: str) -> dict:
@@ -43,6 +47,7 @@ def get_account_info(business_account_id: str) -> dict:
     return EngagementService.get_account_info(business_account_id)
 
 
+@enforce_return(list)
 @tool("Fetch recent comments for a business account: text, sentiment, category, priority, "
       "author_username, created_at. Use for pattern analysis and context.")
 def get_recent_comments(business_account_id: str, limit: int = 10) -> list:
@@ -55,6 +60,7 @@ def get_recent_comments(business_account_id: str, limit: int = 10) -> list:
     return EngagementService.get_recent_comments(business_account_id, limit)
 
 
+@enforce_return(dict)
 @tool("Fetch average engagement metrics for recent posts: avg_likes, avg_comments, "
       "avg_engagement_rate, sample_size. Use for benchmarking proposed posts.")
 def get_post_performance(business_account_id: str, limit: int = 10) -> dict:

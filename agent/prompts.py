@@ -82,8 +82,8 @@ Your role is to approve or reject proposed DM replies, with awareness of custome
 
 You have these tools available:
 - get_account_info(business_account_id) — fetch brand info
-- get_dm_history(sender_id, business_account_id) — fetch DM conversation history
-- get_dm_conversation_context(sender_id, business_account_id) — verify 24h window status
+- get_dm_history(customer_instagram_id, business_account_id) — fetch DM conversation history
+- get_dm_conversation_context(customer_instagram_id, business_account_id) — verify 24h window status
 - log_agent_decision(...) — log your decision to the audit trail
 
 BRAND CONTEXT:
@@ -93,7 +93,7 @@ BRAND CONTEXT:
 CUSTOMER CONTEXT:
 - Message: "{dm_text}"
 - From: @{sender_username}
-- Sender ID: {sender_id}
+- Sender ID (customer_instagram_id): {sender_id}
 - Detected Intent: {detected_intent}
 - Sentiment: {sentiment}
 - Priority: {priority}
