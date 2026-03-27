@@ -20,14 +20,19 @@ class DMService:
     # READ: DM History (two-table structure)
     # ─────────────────────────────────────────
     @staticmethod
-    def get_dm_history(sender_id: str, business_account_id: str, limit: int = 5) -> list:
+    def get_dm_history(customer_instagram_id: str, business_account_id: str, limit: int = 5) -> list:
         """Fetch DM conversation history for a sender.
 
         Two-step: find conversation by customer_instagram_id + business_account_id,
         then fetch messages from that conversation.
         Maps to backward-compatible keys: direction (inbound/outbound), etc.
+
+        Args:
+            customer_instagram_id: Instagram numeric ID of the DM sender (matches DB column customer_instagram_id)
+            business_account_id: UUID of the Instagram business account
+            limit: Number of recent messages to fetch
         """
-        if not supabase or not sender_id:
+        if not supabase or not customer_instagram_id:
             return []
 
         try:
@@ -35,7 +40,7 @@ class DMService:
                 supabase.table("instagram_dm_conversations")
                 .select("id, conversation_status, within_window, window_expires_at")
                 .eq("business_account_id", business_account_id)
-                .eq("customer_instagram_id", sender_id)
+                .eq("customer_instagram_id", customer_instagram_id)
                 .limit(1),
                 table="instagram_dm_conversations",
                 operation="select",
@@ -72,16 +77,21 @@ class DMService:
             logger.error("Circuit breaker OPEN — skipping DM history fetch")
             return []
         except Exception as e:
-            logger.warning(f"Failed to fetch DM history for {sender_id}: {e}")
+            logger.warning(f"Failed to fetch DM history for {customer_instagram_id}: {e}")
             return []
 
     # ─────────────────────────────────────────
     # READ: DM Conversation Context
     # ─────────────────────────────────────────
     @staticmethod
-    def get_dm_conversation_context(sender_id: str, business_account_id: str) -> dict:
-        """Fetch conversation-level metadata: window status, message count."""
-        if not supabase or not sender_id:
+    def get_dm_conversation_context(customer_instagram_id: str, business_account_id: str) -> dict:
+        """Fetch conversation-level metadata: window status, message count.
+
+        Args:
+            customer_instagram_id: Instagram numeric ID of the DM sender (matches DB column customer_instagram_id)
+            business_account_id: UUID of the Instagram business account
+        """
+        if not supabase or not customer_instagram_id:
             return {}
 
         try:
@@ -89,7 +99,7 @@ class DMService:
                 supabase.table("instagram_dm_conversations")
                 .select("within_window, window_expires_at, conversation_status, message_count, last_message_at")
                 .eq("business_account_id", business_account_id)
-                .eq("customer_instagram_id", sender_id)
+                .eq("customer_instagram_id", customer_instagram_id)
                 .limit(1),
                 table="instagram_dm_conversations",
                 operation="select",
@@ -100,7 +110,7 @@ class DMService:
             logger.error("Circuit breaker OPEN — skipping DM conversation context fetch")
             return {}
         except Exception as e:
-            logger.warning(f"Failed to fetch DM conversation context for {sender_id}: {e}")
+            logger.warning(f"Failed to fetch DM conversation context for {customer_instagram_id}: {e}")
             return {}
 
     # ─────────────────────────────────────────

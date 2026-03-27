@@ -23,7 +23,10 @@ Backward compatibility:
 Re-exported infra helpers (for existing callers that import these directly):
     supabase, execute, cache_get, cache_set,
     _redis, _redis_available, is_redis_healthy,
-    post_context_cache, account_info_cache, attribution_model_cache
+    post_context_cache, account_info_cache, attribution_model_cache, analytics_cache
+
+Tool modules (for tools/ package):
+    OVERSIGHT_TOOLS — @tool-decorated oversight/explainability tools
 """
 
 from datetime import datetime, timezone, timedelta
@@ -194,3 +197,17 @@ class SupabaseService:
             return True
         except Exception:
             return False
+
+
+# ================================
+# Oversight Tools (for tools/ package)
+# ================================
+from ._oversight_tools import (
+    get_audit_log_entries,
+    get_run_summary,
+)
+
+OVERSIGHT_TOOLS = [
+    get_audit_log_entries,
+    get_run_summary,
+]

@@ -35,17 +35,16 @@ TOOL_TIMEOUT_SECONDS = 5.0
 # ================================
 # Scoped Tool Sets
 # ================================
-# Import individual tools directly (not from tools/__init__.py which only has lists).
-# This avoids circular import issues — automation_tools now routes through LLMService
-# directly (no AgentService dependency), and supabase_tools uses lazy imports.
+# Import individual @tool-decorated functions from supabase_tools.py.
+# Tool names have no _tool suffix — the @tool decorator makes them self-evident.
 from tools.supabase_tools import (
-    get_post_context_tool,
-    get_account_info_tool,
-    get_recent_comments_tool,
-    get_dm_history_tool,
-    get_dm_conversation_context_tool,
-    get_post_performance_tool,
-    log_decision_tool,
+    get_post_context,
+    get_account_info,
+    get_recent_comments,
+    get_dm_history,
+    get_dm_conversation_context,
+    get_post_performance,
+    log_decision,
 )
 from tools.automation_tools import (
     analyze_message_tool,
@@ -55,10 +54,10 @@ from tools.automation_tools import (
 
 ENGAGEMENT_SCOPE_TOOLS = [
     # Supabase read tools needed for engagement analysis
-    get_post_context_tool,
-    get_account_info_tool,
-    get_recent_comments_tool,
-    log_decision_tool,
+    get_post_context,
+    get_account_info,
+    get_recent_comments,
+    log_decision,
     # Automation execution tools
     analyze_message_tool,
     reply_to_comment_tool,
@@ -66,16 +65,16 @@ ENGAGEMENT_SCOPE_TOOLS = [
 ]
 
 CONTENT_SCOPE_TOOLS = [
-    get_post_context_tool,
-    get_account_info_tool,
-    get_post_performance_tool,
-    log_decision_tool,
+    get_post_context,
+    get_account_info,
+    get_post_performance,
+    log_decision,
 ]
 
 ATTRIBUTION_SCOPE_TOOLS = [
-    get_dm_history_tool,
-    get_account_info_tool,
-    log_decision_tool,
+    get_dm_history,
+    get_account_info,
+    log_decision,
 ]
 
 SCOPED_TOOLS = {

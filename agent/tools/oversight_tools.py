@@ -1,191 +1,44 @@
 """
 Oversight Brain Tools
-=====================
-Read-only explainability tools for the Oversight Brain.
-Kept separate from supabase_tools.py (which serves approval/webhook workflows).
+====================
+Aggregated wrapper around services/supabase_service/_oversight_tools.py.
 
-These query audit_log and scheduler run data to explain agent decisions.
+Two categories:
+  1. LangChain tools (exposed to the LLM via OversightBrain's <<TOOL_CALL>> markers):
+       get_audit_log_entries_tool, get_run_summary_tool
+  2. Internal helpers (used by OversightBrain directly, not exposed to LLM):
+       _get_audit_log_entries, _get_run_summary, _get_operational_entries
+
+The internal functions are re-exported from the @tool-decorated versions
+in services/supabase_service/_oversight_tools.py so OversightBrain doesn't need
+to change its imports.
 """
 
-from typing import Optional
-from cachetools import TTLCache
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
 
-# L1 cache for operational entries — called on every oversight request
-_auto_context_cache: TTLCache = TTLCache(maxsize=50, ttl=45)
+# Internal functions — re-exported for OversightBrain (backward compat)
+# These are the actual implementations; OversightBrain calls them directly
+# when it encounters <<TOOL_CALL>> markers (not via llm.bind_tools).
+from services.supabase_service._oversight_tools import (
+    get_audit_log_entries as _get_audit_log_entries,
+    get_run_summary as _get_run_summary,
+    get_operational_entries as _get_operational_entries,
+)
 
-
-# ================================
-# Input Schemas
-# ================================
-class AuditLogQueryInput(BaseModel):
-    resource_id: Optional[str] = Field(None, description="Filter by resource UUID (comment_id, post_id, etc.)")
-    event_type: Optional[str] = Field(None, description="Filter by event type (e.g. 'webhook_comment_processed')")
-    date_from: Optional[str] = Field(None, description="ISO date string e.g. '2026-02-01'")
-    business_account_id: Optional[str] = Field(None, description="Filter by business account UUID (matches details->business_account_id in audit_log)")
-    limit: int = Field(default=10, ge=1, le=50, description="Max results to return")
-
-
-class RunSummaryInput(BaseModel):
-    run_id: str = Field(description="Run UUID from scheduler execution (found in audit_log details.run_id)")
-
-
-# ================================
-# Implementations
-# ================================
-def _get_audit_log_entries(
-    resource_id: Optional[str] = None,
-    event_type: Optional[str] = None,
-    date_from: Optional[str] = None,
-    business_account_id: Optional[str] = None,
-    limit: int = 10,
-) -> list:
-    """Query audit_log for decision history."""
-    from services.supabase_service import _execute_query, _cache_get, _cache_set
-    from config import supabase
-
-    # Build cache key from all filter params
-    cache_key = f"oversight:audit:{resource_id}:{event_type}:{date_from}:{business_account_id}:{limit}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    query = supabase.table("audit_log").select(
-        "id,event_type,action,resource_type,resource_id,details,created_at"
-    )
-    if resource_id:
-        query = query.eq("resource_id", resource_id)
-    if event_type:
-        query = query.eq("event_type", event_type)
-    if date_from:
-        query = query.gte("created_at", date_from)
-    if business_account_id:
-        # Filter by business_account_id stored in details JSON, NOT user_id column
-        # user_id is the actor (system/user UUID), business_account_id is in details
-        query = query.filter("details->>business_account_id", "eq", business_account_id)
-
-    result = _execute_query(
-        query.order("created_at", desc=True).limit(limit),
-        table="audit_log",
-        operation="select",
-    )
-    result_data = result.data or []
-    _cache_set(cache_key, result_data, ttl=45)
-    return result_data
-
-
-def _get_run_summary(run_id: str) -> dict:
-    """Get summary statistics for a scheduler run by run_id."""
-    from services.supabase_service import _execute_query, _cache_get, _cache_set
-    from config import supabase
-
-    # Build cache key
-    cache_key = f"oversight:run:{run_id}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
-    result = _execute_query(
-        supabase.table("audit_log")
-            .select("event_type,action,created_at")
-            .filter("details->>run_id", "eq", run_id)
-            .order("created_at", desc=False),
-        table="audit_log",
-        operation="select",
-    )
-    entries = result.data or []
-
-    if not entries:
-        return {"error": "run_not_found", "run_id": run_id}
-
-    event_counts: dict = {}
-    action_counts: dict = {}
-    for e in entries:
-        event_counts[e["event_type"]] = event_counts.get(e["event_type"], 0) + 1
-        action_counts[e["action"]] = action_counts.get(e["action"], 0) + 1
-
-    summary = {
-        "run_id": run_id,
-        "total_entries": len(entries),
-        "event_types": event_counts,
-        "actions": action_counts,
-        "started_at": entries[0]["created_at"],
-        "finished_at": entries[-1]["created_at"],
-    }
-    _cache_set(cache_key, summary, ttl=45)
-    return summary
-
-
-# ================================
-# Internal Auto-Context Query
-# ================================
-def _get_operational_entries(business_account_id: str, limit: int = 12) -> list:
-    """Fetch recent operational audit_log entries for auto-context injection.
-
-    Single-query replacement for the 17-type loop in _fetch_auto_context.
-    Excludes oversight_chat_query at DB level — those arrive via chat_history,
-    not audit_log, so including them would duplicate context.
-
-    Not exposed as a LangChain tool — internal use only.
-    """
-    from services.supabase_service import _execute_query, _cache_get, _cache_set
-    from config import supabase
-
-    cache_key = f"oversight:operational:{business_account_id}:{limit}"
-
-    # L1 check
-    if cache_key in _auto_context_cache:
-        return _auto_context_cache[cache_key]
-
-    # L2 check
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        _auto_context_cache[cache_key] = cached
-        return cached
-
-    # Single query — DB does the exclusion, no Python-side type looping
-    result = _execute_query(
-        supabase.table("audit_log")
-            .select("id,event_type,action,resource_type,resource_id,details,created_at")
-            .filter("details->>business_account_id", "eq", business_account_id)
-            .neq("event_type", "oversight_chat_query")
-            .order("created_at", desc=True)
-            .limit(limit),
-        table="audit_log",
-        operation="select",
-    )
-    entries = result.data or []
-
-    _auto_context_cache[cache_key] = entries
-    _cache_set(cache_key, entries, ttl=45)
-    return entries
-
-
-# ================================
-# Tool Definitions
-# ================================
+# LangChain tool wrappers — @tool-decorated functions converted to StructuredTool
+# for OversightBrain's tool-calling mechanism
 get_audit_log_entries_tool = StructuredTool.from_function(
     func=_get_audit_log_entries,
     name="get_audit_log_entries",
-    description=(
-        "Query audit_log for decision history. Use to explain why the agent took an action. "
-        "Filter by resource_id, event_type, or date. Returns chronological list of decisions."
-    ),
-    args_schema=AuditLogQueryInput,
 )
 
 get_run_summary_tool = StructuredTool.from_function(
     func=_get_run_summary,
     name="get_run_summary",
-    description=(
-        "Get statistics for a scheduler run (engagement_monitor, content_scheduler, etc.) by run_id. "
-        "Shows total_entries, event_type counts, action counts, start/end timestamps."
-    ),
-    args_schema=RunSummaryInput,
 )
 
 
+# LangChain tool list (used by tools/__init__.py)
 OVERSIGHT_TOOLS = [
     get_audit_log_entries_tool,
     get_run_summary_tool,

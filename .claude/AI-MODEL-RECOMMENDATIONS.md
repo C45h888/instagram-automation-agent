@@ -1,282 +1,219 @@
-# AI Model Recommendations for Instagram Automation Oversight Brain
-
-**Document Purpose:** Reference guide for selecting and deploying AI models for the LangChain agent's oversight capabilities (sentiment analysis, comment moderation, action recommendations). Generated via Hugging Face Hub analysis.
-
-**Last Updated:** 2026-02-02
-**Target Environment:** Hetzner CX43/CAX31 VPS (8 vCPU, 16GB RAM, Docker)
-**Integration:** Ollama + llama.cpp for local inference
-
----
-
-## Quick Selection Matrix
-
-| Model | Size | Inference Speed | Analysis Quality | Memory (Q5) | Recommended For |
-|-------|------|-----------------|------------------|-------------|-----------------|
-| **Mistral-7B-Instruct-v0.2** ⭐ | 7B | ⚡⚡ Fast | Excellent | ~5GB | PRIMARY - Best all-around |
-| **Mistral-7B-OpenOrca** | 7B | ⚡ Balanced | Excellent+ | ~5GB | SECONDARY - Complex reasoning |
-| **Llama-3-8B-Quantized** | 8B | ⚡ Balanced | Excellent | ~6GB | FALLBACK - Llama preference |
-| **Mistral-Trismegistus** | 7B | ⚡ Balanced | Excellent+ | ~5GB | ALTERNATIVE - GPT-4 tuned |
-
----
-
-## TIER 1: RECOMMENDED MODELS
-
-### 1. ⭐ TheBloke/Mistral-7B-Instruct-v0.2-GGUF
-
-**Model ID:** `mistralai/Mistral-7B-Instruct-v0.2`
-**Parameters:** 7B
-**Format:** GGUF (quantized, ready for Ollama)
-**Community Adoption:** 78.5K downloads, 500 likes
-
-**Link:** [View on Hugging Face](https://hf.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF)
-
-#### Strengths ✅
-- **Lightweight:** Only 7B params = faster inference (key for N8N webhook latency)
-- **Instruction-Tuned:** Excellent for structured tasks (sentiment analysis, action recommendations)
-- **Proven Performance:** High download count indicates community validation
-- **Memory Efficient:** Q5 quantization = ~5GB on your 16GB RAM setup
-- **Fast Response Times:** ~100-300ms per query on 8 vCPU (acceptable for N8N triggers)
-- **Balanced:** Good reasoning without overcomplicating overhead
-- **Use Cases:**
-  - Comment sentiment classification (positive/negative/neutral)
-  - Reply recommendation generation
-  - Spam/bot detection heuristics
-  - Action priority scoring
-
-#### Drawbacks ❌
-- **Reasoning Limits:** May struggle with extremely complex multi-step analysis
-- **Context Window:** Smaller context window (~32K) vs newer models
-- **Instruct-Only:** Requires careful prompt engineering for nuanced tasks
-- **No Fine-Tuning Included:** Generic instruction-tuning, not Instagram-specific
-
-#### Recommended Quantization
-- **Q5_K_M:** Sweet spot for your setup (speed + quality)
-- **Q4_K_M:** If memory constrained, acceptable quality drop
-- **Q6_K:** If prioritizing accuracy over speed
-
-#### Deployment Command
-```bash
-ollama pull mistral:7b-instruct-v0.2-q5_K_M
-```
-
----
-
-### 2. TheBloke/Mistral-7B-OpenOrca-GGUF
-
-**Model ID:** `Open-Orca/Mistral-7B-OpenOrca`
-**Parameters:** 7B
-**Format:** GGUF
-**Base Model:** Mistral-7B fine-tuned on Open-Orca synthetic dataset
-**Community Adoption:** 3K downloads, 242 likes
-
-**Link:** [View on Hugging Face](https://hf.co/TheBloke/Mistral-7B-OpenOrca-GGUF)
-
-#### Strengths ✅
-- **Enhanced Reasoning:** Fine-tuned on high-quality Open-Orca dataset (synthetic GPT-generated responses)
-- **Better Chain-of-Thought:** Superior at multi-step decision logic
-- **Explanation Generation:** Can provide reasoning for decisions (valuable for audit logging)
-- **Complex Analysis:** Better at nuanced sentiment and context understanding
-- **Still Lightweight:** Maintains 7B param advantage
-- **Use Cases:**
-  - Complex comment interpretation (sarcasm, context-dependent sentiment)
-  - Multi-factor action recommendations
-  - Detailed audit log entries with reasoning
-  - DM reply generation with contextual awareness
-
-#### Drawbacks ❌
-- **Slightly Slower:** ~10-20% slower inference than base Mistral (still acceptable)
-- **Less Adoption:** Fewer downloads = less community feedback/optimization
-- **Training Data Synthetic:** OpenOrca data may not reflect Instagram's social dynamics
-- **Potential Overfitting:** Fine-tuning could cause quirks vs base model
-
-#### Recommended Quantization
-- **Q5_K_M:** Recommended (reasoning benefits justify slight slowdown)
-- **Q4_K_M:** Acceptable if inference latency critical
-
-#### Deployment Command
-```bash
-ollama pull open-orca:mistral-7b-q5_K_M
-```
-
----
-
-### 3. Manirathinam21/Llama-3-8B-Quantized-GGUF
-
-**Model ID:** `meta-llama/Llama-3-8B`
-**Parameters:** 8B
-**Format:** GGUF (Q4 & Q8 variants available)
-**Available Quantizations:** Q4 (4GB), Q8 (7GB)
-**Community Adoption:** 7 downloads (newer)
-
-**Link:** [Llama-3-8B-Quantized-GGUF](https://hf.co/Manirathinam21/Llama-3-8B-Quantized-GGUF)
-
-#### Strengths ✅
-- **Matches Original Spec:** Exactly 8B parameters as planned
-- **Meta Quality:** Llama 3 is strong baseline model from official research
-- **Flexible Quantization:** Choose Q4 (speed) or Q8 (quality)
-- **Larger Model:** Slightly more capability than 7B variants
-- **Official Support:** Meta-backed model has ongoing support
-- **Use Cases:**
-  - All Mistral-7B use cases with extra capacity
-  - Handling ambiguous Instagram context/slang
-  - More robust general-purpose analysis
-
-#### Drawbacks ❌
-- **Slower than Mistral-7B:** 8B = ~15-20% slower inference
-- **More Memory:** Q5 quantization uses ~6GB (vs 5GB for 7B)
-- **Not Instruction-Tuned:** Base Llama-3-8B variant (may need better prompts)
-- **Lower Adoption:** Fewer downloads = less battle-tested for production
-- **Overkill for Lightweight Tasks:** You may not need the extra 1B params
-
-#### Recommended Quantization
-- **Q5_K_M:** Best balance (5-6GB)
-- **Q4_K_M:** If memory critical
-- **Q8_0:** If maximum quality needed
-
-#### Deployment Command
-```bash
-# Download from repo with quantization variants
-huggingface-cli download Manirathinam21/Llama-3-8B-Quantized-GGUF --repo-type model
-```
-
----
-
-## TIER 2: ALTERNATIVE OPTIONS
-
-### 4. TheBloke/Mistral-7B-Instruct-v0.1-GGUF
-
-**Parameters:** 7B
-**Downloads:** 19.3K | **Likes:** 608
-**Status:** Older but stable version
-
-**Strengths:** Battle-tested in production, excellent community support, slightly smaller context but rock-solid
-**Drawbacks:** Older instruction tuning, v0.2 is generally preferred
-**Use When:** You need proven stability over latest features
-
-**Link:** [Mistral-7B-Instruct-v0.1-GGUF](https://hf.co/TheBloke/Mistral-7B-Instruct-v0.1-GGUF)
-
----
-
-### 5. TheBloke/Mistral-Trismegistus-7B-GGUF
-
-**Parameters:** 7B
-**Base Training:** Fine-tuned on GPT-4 synthetic data for reasoning
-**Status:** Specialized reasoning variant
-
-**Strengths:** Enhanced reasoning (Trismegistus = "thrice-great" in Hermeticism), GPT-4 quality data
-**Drawbacks:** Even less adoption (~100 downloads), inference slightly slower
-**Use When:** You need maximum reasoning quality for complex oversight decisions
-
-**Link:** [Mistral-Trismegistus-7B-GGUF](https://hf.co/TheBloke/Mistral-Trismegistus-7B-GGUF)
-
----
-
-### 6. RichardErkhov/Izdibay_-_llama3-8b-quantized (Q4/Q8 variants)
-
-**Parameters:** 8B
-**Variants:** Q4 (~4GB), Q8 (~7GB)
-**Status:** Direct quantization of Llama-3-8B
-
-**Strengths:** Maximum flexibility in quantization levels
-**Drawbacks:** Same as Llama-3-8B (less adoption, not instruction-tuned)
-**Use When:** Exact 8B Llama with extreme memory constraints (Q4)
-
-**Links:** [Q4](https://hf.co/RichardErkhov/Izdibay_-_llama3-8b-quantized-q4-gguf) | [Q8](https://hf.co/RichardErkhov/Izdibay_-_llama3-8b-quantized-q8-gguf)
-
----
-
-## Quantization Reference Guide
-
-### Understanding GGUF Quantization
-
-GGUF files contain different quantization levels. Choose based on your VPS constraints:
-
-| Quantization | Bits Per Weight | File Size (7B) | Quality Level | Speed | Recommended For |
-|--------------|-----------------|----------------|---------------|-------|-----------------|
-| **Q2_K** | 2.3 | ~3GB | Poor | ⚡⚡⚡ Fastest | Emergency fallback only |
-| **Q3_K_M** | 3 | ~3.5GB | Fair | ⚡⚡ Very Fast | Tight memory constraints |
-| **Q4_K_M** ✓ | 4 | ~4.5GB | Good | ⚡ Fast | Budget memory setups |
-| **Q5_K_M** ⭐ | 5 | ~5.5GB | Excellent | ⚡ Balanced | **RECOMMENDED** |
-| **Q6_K** | 6 | ~6.5GB | Excellent+ | 🐢 Slower | Quality-first production |
-| **Q8_0** | 8 | ~7.5GB | Near-Original | 🐢 Slowest | Maximum accuracy needed |
-
-### Recommendation for Your Setup
-
-**Hetzner CX43 Specs:** 8 vCPU, 16GB RAM
-
-- **Primary Choice:** Q5_K_M quantization on any 7B model (~5.5GB)
-- **Fallback:** Q4_K_M if memory issues (~4.5GB, acceptable quality)
-- **Premium:** Q6_K only if dedicated oversight machine planned (~6.5GB)
-
----
-
-## Performance Benchmarks (Estimated)
-
-On Hetzner CX43 (8 vCPU, shared resources):
-
-| Model | Quantization | Avg Inference Time | Concurrent Capacity |
-|-------|---------------|--------------------|---------------------|
-| Mistral-7B | Q4 | ~80-100ms | 8-10 requests |
-| Mistral-7B | Q5 | ~120-150ms | 6-8 requests |
-| Mistral-7B-OpenOrca | Q5 | ~140-180ms | 5-7 requests |
-| Llama-3-8B | Q5 | ~150-180ms | 5-7 requests |
-
-**N8N Integration Note:** Webhook timeouts typically ~30s, so even slowest option (180ms) allows 150+ sequential analyses before timeout.
-
----
-
-## FINAL RECOMMENDATION FOR YOUR PROJECT
-
-### 🎯 Production Setup
-
-**Primary Model:** `TheBloke/Mistral-7B-Instruct-v0.2-GGUF` with **Q5_K_M** quantization
-
-**Why This Choice:**
-1. ✅ Balances speed (100-150ms inference) with quality
-2. ✅ Proven adoption (78.5K downloads)
-3. ✅ Instruction-tuned for structured oversight tasks
-4. ✅ Memory efficient (5.5GB) leaves room for N8N/Supabase queries
-5. ✅ Fast enough for N8N webhook integration
-6. ✅ Easier to prompt-engineer than alternatives
-
-**Secondary Model:** `TheBloke/Mistral-7B-OpenOrca-GGUF` with **Q5_K_M**
-
-**When to Use OpenOrca:**
-- Complex multi-step analysis required
-- Need detailed reasoning for audit logs
-- Handling nuanced sentiment/context analysis
-
-### 📋 Deployment Priority Order
-
-1. **Start with:** Mistral-7B-Instruct-v0.2 (Q5_K_M)
-2. **Test with:** OpenOrca variant if accuracy issues arise
-3. **Fallback to:** Llama-3-8B-Q4 if memory constraints hit
-4. **Never use:** Models with <1000 community downloads for production
-
----
-
-## Integration Checklist
-
-- [ ] Download chosen model GGUF file to Docker volume
-- [ ] Load into Ollama service in docker-compose.yml
-- [ ] Test inference latency: `time curl http://ollama:11434/api/generate`
-- [ ] Set N8N webhook timeout to 45s (safety margin for inference)
-- [ ] Create system prompt for oversight (e.g., sentiment classifier, action recommender)
-- [ ] Log model decisions to `audit_log` table in Supabase
-- [ ] Monitor inference time during peak load
-- [ ] Have Q4 quantization backup if Q5 shows memory issues
-
----
-
-## References
-
-- [Mistral-7B Technical Report](https://arxiv.org/abs/2310.06825)
-- [Open-Orca Dataset Paper](https://arxiv.org/abs/2306.02707)
-- [GGUF Format Specification](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md)
-- [Ollama Documentation](https://ollama.ai)
-
----
-
-**Document for:** LangChain Agent Planning & Deployment
-**Maintainer:** Claude Code (AI Assistant)
-**Status:** Ready for architecture review
+Here's the plan for implementing the @tool decorator bridging pattern.
+
+Plan: @tool Decorator on SupabaseService Domain Classes
+The Core Problem We're Solving
+
+TODAY: Two contracts, maintained by hand in two places
+─────────────────────────────────────────────────────
+supabase_tools.py          SupabaseService methods
+     │                         │
+args_schema (Pydantic)     function signature
+     │                         │
+     └── enforced by hand ──────┘
+          (easy to drift)
+
+AFTER: One contract, one place, enforced automatically
+─────────────────────────────────────────────────────
+Domain service methods decorated with @tool
+     │
+     │  schema inferred from type annotations
+     │  description from decorator parameter
+     │  function = schema = tool
+     │
+supabase_tools.py imports & aggregates only
+Architecture After Fix
+
+services/supabase_service/
+    _engagement.py           → EngagementTools (@tool-decorated methods)
+    _dms.py                  → DMTools (@tool-decorated methods)
+    _ops.py                  → OpsTools (@tool-decorated methods)
+    _attribution.py           → AttributionTools (@tool-decorated methods)
+    _content.py               → ContentTools (@tool-decorated methods)
+    
+tools/
+    supabase_tools.py        → aggregates all tools into SUPABASE_TOOLS list
+                               (no schema classes, no Field descriptions)
+Step-by-Step Implementation
+Step 1 — Create the tool modules alongside domain services
+
+For each domain service, create a matching _X_tools.py file in services/supabase_service/. These files:
+
+Import the domain service class
+Define @tool-decorated wrappers around the service methods
+Keep field descriptions as single source of truth
+
+# services/supabase_service/_engagement_tools.py
+"""Engagement Tools — @tool-decorated wrappers around EngagementService."""
+
+from langchain_core.tools import tool
+from services.supabase_service._engagement import EngagementService
+
+
+@tool("Fetch post details: caption, likes, comments, engagement_rate, media_type. "
+      "Use when evaluating a comment reply or post.")
+def get_post_context(post_id: str) -> dict:
+    """Fetch post context from instagram_media.
+
+    Args:
+        post_id: Instagram media ID to fetch context for
+    """
+    return EngagementService.get_post_context(post_id)
+
+
+@tool("Fetch business account info: username, name, account_type, followers_count, "
+          "biography, category. Use to understand brand voice and context.")
+def get_account_info(business_account_id: str) -> dict:
+    """Fetch account info from instagram_business_accounts.
+
+    Args:
+        business_account_id: UUID of the Instagram business account
+    """
+    return EngagementService.get_account_info(business_account_id)
+
+
+@tool("Fetch recent comments for pattern analysis. Returns text, sentiment, category, priority.")
+def get_recent_comments(business_account_id: str, limit: int = 10) -> list:
+    """Fetch recent comments for a business account.
+
+    Args:
+        business_account_id: UUID of the Instagram business account
+        limit: Number of recent comments to fetch (1-50, default 10)
+    """
+    return EngagementService.get_recent_comments(business_account_id, limit)
+Step 2 — Update supabase_tools.py to import from tool modules
+
+supabase_tools.py becomes a pure aggregator — no schemas, no Pydantic classes, no descriptions:
+
+
+"""Aggregated Supabase tools for AgentService binding."""
+
+from langchain_core.tools import StructuredTool
+
+# Import @tool-decorated functions
+from services.supabase_service._engagement_tools import (
+    get_post_context,
+    get_account_info,
+    get_recent_comments,
+)
+from services.supabase_service._dm_tools import (
+    get_dm_history,
+    get_dm_conversation_context,
+)
+from services.supabase_service._content_tools import (
+    get_post_performance,      # lives in _content.py alongside post methods
+)
+from services.supabase_service._ops_tools import (
+    log_decision,
+)
+
+
+def _as_structured_tool(tool_func) -> StructuredTool:
+    """Convert a @tool-decorated function to StructuredTool.
+    
+    @tool returns a Tool directly; StructuredTool.from_function
+    wraps it. This handles both cases.
+    """
+    from langchain_core.tools import StructuredTool
+    if isinstance(tool_func, StructuredTool):
+        return tool_func
+    return StructuredTool.from_function(tool_func)
+
+
+# Map tool names to their @tool-decorated functions
+TOOL_MAP = {
+    "get_post_context": get_post_context,
+    "get_account_info": get_account_info,
+    "get_recent_comments": get_recent_comments,
+    "get_dm_history": get_dm_history,
+    "get_dm_conversation_context": get_dm_conversation_context,
+    "get_post_performance": get_post_performance,
+    "log_decision": log_decision,
+}
+
+SUPABASE_TOOLS = [TOOL_MAP[name] for name in TOOL_MAP]
+This is a pure rename and re-export — no new logic.
+
+Step 3 — Convert all domain service classes
+
+For each domain service (_dms.py, _ops.py, _content.py), create a matching _X_tools.py file following the same pattern. The full list:
+
+Tool Module	Source Service	Tools
+_engagement_tools.py	EngagementService	get_post_context, get_account_info, get_recent_comments
+_dm_tools.py	DMService	get_dm_history, get_dm_conversation_context
+_ops_tools.py	OpsService	log_decision
+_content_tools.py	ContentService	get_post_performance
+AttributionService tools are intentionally excluded — none of its methods are used as LangChain tools. They are internal pipeline functions.
+
+Step 4 — Audit log_decision return type
+
+Before wiring log_decision as a tool, fix the silent failure problem identified earlier. Change the return to include the audit row ID:
+
+
+# _ops_tools.py
+@tool("Log an agent decision to the audit_log table. Returns the audit row ID.")
+def log_decision(...) -> dict:
+    """Log agent decision. Returns {"success": bool, "audit_log_id": str}"""
+    success = OpsService.log_decision(...)
+    # If called as a @tool, we need to return something the LLM can read
+    return {"success": success, "audit_log_id": "...", "event_type": event_type}
+The LLM currently receives True from this tool — it has no idea what audit row was created. This makes OversightBrain harder to use because the LLM that logged the decision doesn't know the row ID.
+
+Step 5 — Verify AgentService tool binding still works
+
+After the conversion, AgentService imports SUPABASE_TOOLS exactly as before. The binding is unchanged:
+
+
+# agent_service.py (unchanged)
+from tools.supabase_tools import SUPABASE_TOOLS
+
+ENGAGEMENT_SCOPE_TOOLS = [
+    get_post_context,        # already a @tool-decorated function, not a StructuredTool
+    get_account_info,
+    get_recent_comments,
+    log_decision,
+    analyze_message_tool,    # still from automation_tools.py
+    reply_to_comment_tool,     # still from automation_tools.py
+    reply_to_dm_tool,         # still from automation_tools.py
+]
+The key check: llm.bind_tools() accepts both StructuredTool instances and plain @tool-decorated functions. Both are valid tool call targets.
+
+Step 6 — Migrate OVERSIGHT_TOOLS
+
+oversight_tools.py currently bypasses SupabaseService entirely. Convert it to the same pattern:
+
+
+# services/supabase_service/_oversight_tools.py
+from langchain_core.tools import tool
+
+@tool("Query audit_log for decision history. Filter by resource_id, event_type, date, or account.")
+def get_audit_log_entries(
+    resource_id: str | None = None,
+    event_type: str | None = None,
+    date_from: str | None = None,
+    business_account_id: str | None = None,
+    limit: int = 10,
+) -> list:
+    ...
+
+@tool("Get statistics for a scheduler run by run_id. "
+          "Shows total_entries, event_type counts, action counts, start/end timestamps.")
+def get_run_summary(run_id: str) -> dict:
+    ...
+Then update tools/oversight_tools.py to import from the service and become a pure aggregator (same as supabase_tools.py).
+
+Impact Assessment
+File	Change Type	Risk
+supabase_tools.py	Rewrite — remove Pydantic schemas, import from tool modules	Low — becomes simpler
+tools/oversight_tools.py	Rewrite — remove Pydantic schemas, import from service	Low — becomes simpler
+services/supabase_service/_engagement_tools.py	New file	None — additive
+services/supabase_service/_dm_tools.py	New file	None — additive
+services/supabase_service/_ops_tools.py	New file	None — additive
+services/supabase_service/_content_tools.py	New file	None — additive
+agent_service.py	Unchanged	Zero impact
+All domain service classes	Unchanged	Zero impact
+What Changes for the LLM
+Before	After
+Schema derived from hand-written Pydantic classes	Schema inferred from function type annotations
+Description in Field(description=...) in one file	Description in @tool("...") in domain module
+Schema drift possible when function signature changes	Schema and function are the same unit — cannot drift
+log_decision returns True — LLM doesn't know the audit ID	log_decision returns {"success": bool, "audit_log_id": str}
