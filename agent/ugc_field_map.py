@@ -54,3 +54,40 @@ def map_scored_post_to_ugc_content(
         "quality_factors":     factors,
         "run_id":              run_id,
     }
+
+
+def map_ugc_to_scheduled_post(
+    ugc: dict,
+    caption_hook: str,
+    caption_body: str,
+    caption_cta: str,
+    generated_hashtags: list,
+    run_id: str,
+) -> dict:
+    """Map a granted UGC item + LLM-generated caption parts to scheduled_posts columns.
+
+    Used by the UGC repost path in content_scheduler when a granted UGC item
+    is promoted to a scheduled_post.
+
+    Args:
+        ugc: Full ugc_content row dict (from get_ugc_content_for_repost)
+        caption_hook: LLM-generated hook (should include attribution)
+        caption_body: LLM-generated or original ugc message as body
+        caption_cta: LLM-generated CTA
+        generated_hashtags: LLM-generated hashtag list
+        run_id: UGC discovery run UUID
+
+    Returns:
+        Dict with keys matching scheduled_posts column names, ready for insert.
+    """
+    author_username = ugc.get("author_username", "")
+    attribution = f"Repost via @{author_username}" if author_username else ""
+
+    return {
+        "ugc_content_id": ugc.get("id"),
+        "caption_hook": f"{attribution}: {caption_hook}" if attribution else caption_hook,
+        "caption_body": caption_body,
+        "caption_cta": caption_cta,
+        "generated_hashtags": generated_hashtags,
+        "generated_caption": f"{caption_hook}\n\n{caption_body}\n\n{caption_cta}",
+    }

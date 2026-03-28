@@ -3,12 +3,18 @@ Oversight Brain Service
 =======================
 Explainability service for the Oversight Brain chat interface.
 
-Pattern: build prompt with auto-context → direct llm.invoke/astream → optional tool calls
-No bind_tools() — the LLM generates text directly from pre-injected context.
-Tool descriptions are embedded as readable text in the prompt. The LLM uses a
-special syntax <<TOOL:...>> to request a tool call when data is genuinely missing.
-Tool execution is handled inline without AgentService, keeping oversight isolated
-from the automation tool layer.
+Pattern: build prompt with auto-context → direct llm.astream() → <<TOOL_CALL:...>> markers
+Tool execution bridged via AgentService._execute_tool_calls_async() — the shared
+resilient layer used by engagement, content, and attribution pipelines.
+
+Key design decisions:
+  - LLM call stays as direct llm.astream() — mid-stream marker detection gives
+    better UX than LangChain tool_calls detection (tokens keep flowing until
+    the marker is complete; tool execution shows live "fetching..." to client).
+  - Tool execution goes through AgentService — shared 5s timeout, Prometheus
+    metrics, asyncio.gather parallel execution, graceful error returns.
+  - Auto-context injection, SSE event framing, L1/L2 caching, audit logging
+    are OversightBrain domain logic — AgentService knows nothing about these.
 
 Caching: L1 TTLCache + L2 Redis (same pattern as supabase_service.py).
 Conversation-aware: skips cache when chat_history is provided.
@@ -42,6 +48,32 @@ TOOL_TIMEOUT_SECONDS = 5.0
 # Marker the LLM outputs to request a tool call (detected in the text stream)
 TOOL_CALL_OPEN = "<<TOOL_CALL:"
 TOOL_CALL_CLOSE = ">>"
+
+
+# ------------------------------------------------------------------
+# AgentService bridge — shared tool execution layer
+# One AgentService instance per process lifetime. bind_tools() is called
+# once here, not per request. _execute_tool_calls_async() handles:
+#   - asyncio.wait_for 5s timeout per tool
+#   - asyncio.to_thread thread-pool wrapping
+#   - Prometheus TOOL_CALLS metric increment
+#   - asyncio.gather parallel execution
+#   - Graceful {"error": "..."} on failure
+# ------------------------------------------------------------------
+_oversight_agent: Optional["AgentService"] = None
+
+
+def _get_oversight_agent() -> "AgentService":
+    """Get or create the shared oversight AgentService instance.
+
+    One llm.bind_tools() call total — not per request.
+    Reuses the same lazy singleton pattern as engagement_monitor.py.
+    """
+    global _oversight_agent
+    if _oversight_agent is None:
+        from services.agent_service import AgentService
+        _oversight_agent = AgentService(scope="oversight")
+    return _oversight_agent
 
 
 def _cache_key(question: str, business_account_id: str = "") -> str:
@@ -103,43 +135,33 @@ def _parse_tool_calls(text: str) -> list[dict]:
 
 
 async def _execute_oversight_tool(tool_name: str, args: dict) -> dict:
-    """Execute a single oversight tool by name, with timeout."""
-    from tools.oversight_tools import _get_audit_log_entries, _get_run_summary
+    """Execute an oversight tool via the shared AgentService tool layer.
 
-    TOOL_MAP = {
-        "get_audit_log_entries": _get_audit_log_entries,
-        "get_run_summary": _get_run_summary,
-    }
+    Delegates to _execute_tool_calls_async() — the same resilient layer
+    used by engagement, content, and attribution pipelines.
+    Keeps its own function signature so OversightBrain's internal contract
+    (tool_name, args → dict result) is unchanged.
 
-    func = TOOL_MAP.get(tool_name)
-    if not func:
-        return {"error": f"unknown_tool", "message": f"Tool '{tool_name}' not found"}
-
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(func, **args),
-            timeout=TOOL_TIMEOUT_SECONDS,
-        )
-        logger.info(f"Oversight tool '{tool_name}' executed successfully")
-        TOOL_CALLS.labels(tool_name=tool_name).inc()
-        return result
-    except asyncio.TimeoutError:
-        logger.warning(f"Oversight tool '{tool_name}' timed out after {TOOL_TIMEOUT_SECONDS}s")
-        TOOL_CALLS.labels(tool_name=f"{tool_name}_timeout").inc()
-        return {"error": "timeout", "message": f"Tool '{tool_name}' timed out"}
-    except Exception as e:
-        logger.error(f"Oversight tool '{tool_name}' failed: {e}")
-        TOOL_CALLS.labels(tool_name=f"{tool_name}_error").inc()
-        return {"error": str(e)}
+    The <<TOOL_CALL:...>> marker detection stays in _stream_llm_and_tools().
+    The LLM call stays as direct llm.astream() — not routed through AgentService.astream_analyze().
+    """
+    agent = _get_oversight_agent()
+    tool_calls = [{"name": tool_name, "args": args}]
+    tool_outputs = await agent._execute_tool_calls_async(tool_calls)
+    # _execute_tool_calls_async returns {tool_name: result}
+    return tool_outputs.get(
+        tool_name,
+        {"error": f"tool '{tool_name}' not found"}
+    )
 
 
 async def _fetch_auto_context(business_account_id: str, limit: int = 12) -> str:
     """Format recent operational audit_log decisions for prompt injection.
 
-    Query logic lives in _get_operational_entries (oversight_tools.py).
+    Query logic lives in _get_operational_entries (services/supabase_service/_oversight_tools.py).
     This function owns only formatting — no query logic, no type lists.
     """
-    from tools.oversight_tools import _get_operational_entries
+    from services.supabase_service._oversight_tools import get_operational_entries as _get_operational_entries
 
     entries = _get_operational_entries(business_account_id, limit)
 

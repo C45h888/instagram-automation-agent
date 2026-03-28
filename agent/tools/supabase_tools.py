@@ -38,6 +38,12 @@ from tools.automation_tools import (
     reply_to_comment,
     reply_to_dm,
 )
+from tools.content_tools import (
+    evaluate_asset,
+    generate_caption,
+    evaluate_caption,
+    publish_content,
+)
 
 
 def _as_structured_tool(tool_func) -> StructuredTool:
@@ -68,4 +74,8 @@ SUPABASE_TOOLS = [
     _as_structured_tool(log_decision),
     _as_structured_tool(reply_to_comment),
     _as_structured_tool(reply_to_dm),
+    _as_structured_tool(evaluate_asset),
+    _as_structured_tool(generate_caption),
+    _as_structured_tool(evaluate_caption),
+    _as_structured_tool(publish_content),
 ]

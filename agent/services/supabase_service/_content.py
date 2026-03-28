@@ -17,6 +17,37 @@ class ContentService:
     """Assets, scheduled posts, and post-publishing lifecycle."""
 
     # ─────────────────────────────────────────
+    # READ: Single Asset by ID
+    # ─────────────────────────────────────────
+    @staticmethod
+    def get_asset_by_id(asset_id: str) -> dict:
+        """Fetch a single instagram_assets row by UUID. Used by content tools."""
+        if not supabase or not asset_id:
+            return {}
+
+        try:
+            result = execute(
+                supabase.table("instagram_assets")
+                .select(
+                    "id, business_account_id, storage_path, title, description, tags, media_type, "
+                    "last_posted, post_count, avg_engagement, is_active, created_at, "
+                    "ugc_content_id"
+                )
+                .eq("id", asset_id)
+                .single(),
+                table="instagram_assets",
+                operation="select",
+            )
+            return result.data or {}
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping get_asset_by_id")
+            return {}
+        except Exception as e:
+            logger.warning(f"Failed to fetch asset {asset_id}: {e}")
+            return {}
+
+    # ─────────────────────────────────────────
     # READ: Eligible Assets
     # ─────────────────────────────────────────
     @staticmethod
@@ -160,6 +191,7 @@ class ContentService:
         selection_factors: dict,
         caption_data: dict,
         evaluation_data: dict,
+        ugc_content_id: str = None,
     ) -> dict:
         """Insert a new scheduled post with caption and evaluation results."""
         if not supabase:
@@ -183,7 +215,8 @@ class ContentService:
         row = {
             "business_account_id": business_account_id,
             "run_id": run_id,
-            "asset_id": asset.get("id"),
+            "asset_id": asset.get("id") if not ugc_content_id else None,
+            "ugc_content_id": ugc_content_id,
             "asset_storage_path": asset.get("storage_path", ""),
             "asset_url": asset_url,
             "selection_score": selection_score,

@@ -161,3 +161,120 @@ class UGCService:
         except Exception as e:
             logger.warning(f"Failed to fetch granted UGC permissions: {e}")
             return []
+
+    # ─────────────────────────────────────────
+    # READ: UGC Content for Repost (Joined)
+    # ─────────────────────────────────────────
+    @staticmethod
+    def get_ugc_content_for_repost(business_account_id: str) -> list:
+        """Fetch ugc_content + ugc_permissions JOIN for granted UGC posts ready to repost.
+
+        Returns list of dicts with ugc_content fields + ugc_permissions.id as permission_id.
+        Used by content_scheduler to find UGC assets queued for automatic repost.
+        """
+        if not supabase or not business_account_id:
+            return []
+
+        try:
+            result = execute(
+                supabase.table("ugc_permissions")
+                .select("id, ugc_content_id, status")
+                .eq("business_account_id", business_account_id)
+                .eq("status", "granted"),
+                table="ugc_permissions",
+                operation="select",
+            )
+            permissions = result.data or []
+
+            if not permissions:
+                return []
+
+            ugc_content_ids = [p["ugc_content_id"] for p in permissions]
+            perm_map = {p["ugc_content_id"]: p["id"] for p in permissions}
+
+            content_result = execute(
+                supabase.table("ugc_content")
+                .select(
+                    "id, author_username, message, media_type, media_url, permalink_url, "
+                    "like_count, comment_count, created_time"
+                )
+                .in_("id", ugc_content_ids),
+                table="ugc_content",
+                operation="select",
+            )
+
+            merged = []
+            for row in (content_result.data or []):
+                row["permission_id"] = perm_map.get(row["id"])
+                merged.append(row)
+            return merged
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping get_ugc_content_for_repost")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to fetch UGC content for repost: {e}")
+            return []
+
+    # ─────────────────────────────────────────
+    # WRITE: Mark UGC as Reposted
+    # ─────────────────────────────────────────
+    @staticmethod
+    def mark_ugc_reposted(ugc_content_id: str, business_account_id: str) -> bool:
+        """Update ugc_permissions status to 'reposted' after successful publish."""
+        if not supabase or not ugc_content_id:
+            return False
+
+        try:
+            execute(
+                supabase.table("ugc_permissions")
+                .update({"status": "reposted"})
+                .eq("ugc_content_id", ugc_content_id)
+                .eq("business_account_id", business_account_id)
+                .eq("status", "granted"),
+                table="ugc_permissions",
+                operation="update",
+            )
+            return True
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — failed to mark ugc_reposted")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to mark ugc_content {ugc_content_id} as reposted: {e}")
+            return False
+
+    # ─────────────────────────────────────────
+    # READ: Single UGC Content by ID
+    # ─────────────────────────────────────────
+    @staticmethod
+    def get_ugc_content_by_id(ugc_content_id: str, business_account_id: str) -> list:
+        """Fetch a single ugc_content row by UUID.
+
+        Used as fallback when instagram_assets lookup returns empty —
+        enables the generate_caption tool to work with UGC content too.
+        """
+        if not supabase or not ugc_content_id:
+            return []
+
+        try:
+            result = execute(
+                supabase.table("ugc_content")
+                .select(
+                    "id, author_username, message, media_type, media_url, permalink_url, "
+                    "like_count, comment_count, created_time, quality_score, quality_tier"
+                )
+                .eq("id", ugc_content_id)
+                .eq("business_account_id", business_account_id)
+                .limit(1),
+                table="ugc_content",
+                operation="select",
+            )
+            return result.data or []
+
+        except CircuitBreakerError:
+            logger.error("Circuit breaker OPEN — skipping get_ugc_content_by_id")
+            return []
+        except Exception as e:
+            logger.warning(f"Failed to fetch ugc_content {ugc_content_id}: {e}")
+            return []

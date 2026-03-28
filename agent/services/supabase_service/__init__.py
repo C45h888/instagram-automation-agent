@@ -100,6 +100,7 @@ class SupabaseService:
     )
 
     # ── Content ───────────────────────────────
+    get_asset_by_id = staticmethod(ContentService.get_asset_by_id)
     get_eligible_assets = staticmethod(ContentService.get_eligible_assets)
     get_recent_post_tags = staticmethod(ContentService.get_recent_post_tags)
     get_posts_today_count = staticmethod(ContentService.get_posts_today_count)
@@ -117,6 +118,9 @@ class SupabaseService:
     get_granted_ugc_permissions = staticmethod(
         UGCService.get_granted_ugc_permissions
     )
+    get_ugc_content_for_repost = staticmethod(UGCService.get_ugc_content_for_repost)
+    mark_ugc_reposted = staticmethod(UGCService.mark_ugc_reposted)
+    get_ugc_content_by_id = staticmethod(UGCService.get_ugc_content_by_id)
 
     # ── Attribution ─────────────────────────
     get_order_attribution = staticmethod(AttributionService.get_order_attribution)

@@ -212,10 +212,10 @@ class QueueWorker:
     async def _is_safe_to_execute(self, job: dict) -> bool:
         """Check that executing this job won't cause duplicate side-effects.
 
-        Only applies to publish_post: verifies scheduled_posts.status == 'publishing'.
+        Applies to publish_post and repost_ugc: verifies scheduled_posts.status == 'publishing'.
         All other action types return True unconditionally.
         """
-        if job.get("action_type") != "publish_post":
+        if job.get("action_type") not in ("publish_post", "repost_ugc"):
             return True
 
         scheduled_post_id = job.get("payload", {}).get("scheduled_post_id")
@@ -266,7 +266,7 @@ class QueueWorker:
         )
 
         # Action-specific state settlement
-        if action_type == "publish_post":
+        if action_type in ("publish_post", "repost_ugc"):
             await self._settle_publish_post_success(job, response)
 
         # Release execution lock
@@ -296,7 +296,10 @@ class QueueWorker:
         logger.info(f"Job completed: job={job_id} action={action_type} latency={elapsed:.2f}s")
 
     async def _settle_publish_post_success(self, job: dict, response: dict) -> None:
-        """Update scheduled_posts → 'published' + set instagram_media_id."""
+        """Update scheduled_posts → 'published' + set instagram_media_id.
+
+        For repost_ugc: also marks ugc_permissions.status='reposted' via mark_ugc_reposted().
+        """
         from services.supabase_service import SupabaseService
 
         scheduled_post_id = job.get("payload", {}).get("scheduled_post_id")
@@ -314,6 +317,21 @@ class QueueWorker:
             }
         )
         logger.info(f"publish_post settled: post={scheduled_post_id} media_id={instagram_media_id}")
+
+        # For repost_ugc: mark the UGC permission as consumed
+        if job.get("action_type") == "repost_ugc":
+            ugc_content_id = job.get("payload", {}).get("ugc_content_id")
+            business_account_id = job.get("business_account_id", "")
+            if ugc_content_id:
+                result = await asyncio.to_thread(
+                    SupabaseService.mark_ugc_reposted,
+                    ugc_content_id,
+                    business_account_id,
+                )
+                if result:
+                    logger.info(f"repost_ugc settled: ugc_content={ugc_content_id} marked as reposted")
+                else:
+                    logger.warning(f"repost_ugc settled but mark_ugc_reposted failed: ugc_content={ugc_content_id}")
 
     async def _on_failure(
         self,
@@ -353,7 +371,7 @@ class QueueWorker:
             await asyncio.to_thread(OutboundQueue.move_to_dlq, job, reason=f"non_retryable:{error_category}:{error}", error_category=error_category)
             await asyncio.to_thread(OutboundQueue.release_execution_lock, job_id)
 
-            if action_type == "publish_post":
+            if action_type in ("publish_post", "repost_ugc"):
                 await self._settle_publish_post_failure(job, error)
 
             OUTBOUND_QUEUE_EXECUTE.labels(action_type=action_type, status="error").inc()
@@ -410,7 +428,7 @@ class QueueWorker:
             await asyncio.to_thread(OutboundQueue.move_to_dlq, job, reason, error_category=error_category)
             await asyncio.to_thread(OutboundQueue.release_execution_lock, job_id)
 
-            if action_type == "publish_post":
+            if action_type in ("publish_post", "repost_ugc"):
                 await self._settle_publish_post_failure(job, error)
 
             OUTBOUND_QUEUE_EXECUTE.labels(action_type=action_type, status="error").inc()

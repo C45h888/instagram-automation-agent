@@ -18,13 +18,13 @@ Functions:
 
 import asyncio
 import random
+import json
 from datetime import datetime, timezone, timedelta
 
 import uuid as _uuid
 
 from config import (
     logger,
-    llm,
     SUPABASE_URL,
     POST_APPROVAL_THRESHOLD,
     MAX_CAPTION_LENGTH,
@@ -32,6 +32,7 @@ from config import (
     CONTENT_SCHEDULER_MAX_ASSETS_TO_SCORE,
 )
 from services.supabase_service import SupabaseService
+from langchain_core.tools import tool
 
 
 # ================================
@@ -413,3 +414,481 @@ async def publish_post(
         "job_id": result.get("job_id"),
         "error": None,
     }
+
+
+# ================================
+# UGC Content — Reuse granted UGC posts
+# ================================
+def _get_asset_public_url_for_ugc(media_url: str) -> str:
+    """Return media_url directly for UGC (already a public URL from Graph API)."""
+    return media_url
+
+
+# ================================
+# LLM-Callable Tools — Content Pipeline
+# ================================
+# These are @tool-decorated functions that AgentService.bind_tools() exposes to the LLM.
+# Each tool does one focused task; Python enqueues side-effects AFTER LLM confirmation.
+
+# Reusable context fetchers (called internally by tools, not exposed to LLM directly)
+def _fetch_asset_context(asset_id: str, business_account_id: str) -> dict:
+    """Fetch asset + account + performance context for tool functions.
+
+    Tries instagram_assets first. If not found (empty result), falls back to
+    ugc_content so that UGC content can also use the generate_caption tool.
+    """
+    from services.supabase_service._content import ContentService
+
+    asset = ContentService.get_asset_by_id(asset_id)
+
+    # Fallback: if asset_id not found in instagram_assets, check ugc_content
+    from_ugc = False
+    if not asset:
+        from services.supabase_service._ugc import UGCService
+        ugc_list = UGCService.get_ugc_content_by_id(asset_id, business_account_id)
+        if ugc_list:
+            ugc = ugc_list[0]
+            asset = {
+                "id": ugc.get("id"),
+                "title": ugc.get("author_username", "UGC Post"),
+                "description": ugc.get("message", ""),
+                "tags": [],
+                "media_type": ugc.get("media_type", "IMAGE"),
+                "storage_path": "",
+                "author_username": ugc.get("author_username", ""),
+                "message": ugc.get("message", ""),
+                "ugc_content_id": ugc.get("id"),
+                "from_ugc": True,
+            }
+            from_ugc = True
+
+    account = SupabaseService.get_account_info(business_account_id)
+    performance = SupabaseService.get_recent_post_performance(business_account_id)
+    return {
+        "asset": asset or {},
+        "account": account or {},
+        "performance": performance or {"avg_likes": 0, "avg_comments": 0, "avg_engagement_rate": 0},
+        "from_ugc": from_ugc,
+    }
+
+
+def _assemble_asset_context_string(ctx: dict) -> str:
+    """Build a human-readable context string from asset/account/performance dicts for prompt injection."""
+    asset = ctx.get("asset", {})
+    account = ctx.get("account", {})
+    perf = ctx.get("performance", {})
+    parts = [
+        f"Account: @{account.get('username', 'unknown')} ({account.get('account_type', 'business')})",
+        f"Followers: {account.get('followers_count', 0):,}",
+        f"Asset: {asset.get('title', 'Untitled')} | {asset.get('media_type', 'IMAGE')}",
+        f"Description: {asset.get('description', 'No description')}",
+        f"Tags: {', '.join(asset.get('tags', []) or [])}",
+        f"Avg likes: {perf.get('avg_likes', 0):.0f} | Avg comments: {perf.get('avg_comments', 0):.0f}",
+        f"Avg engagement rate: {perf.get('avg_engagement_rate', 0):.2%}",
+    ]
+    return "\n".join(p for p in parts if p)
+
+
+# ─── Tool 1: Evaluate Asset ────────────────────────────────────────────────
+
+@tool(
+    name="evaluate_asset",
+    description="""Evaluate whether a content asset is ready to post.
+
+USE THIS TOOL when you want to assess an asset's quality and posting readiness before generating a caption.
+Returns a quality decision with tier and recommendations — does NOT generate captions.
+
+Args:
+    asset_id: Instagram asset UUID from instagram_assets table
+    business_account_id: Business account UUID
+
+Returns JSON:
+    {quality_score: float (0-10), tier: "post_now"|"needs_review"|"skip",
+     asset_ready: bool, recommendations: list[str], reasoning: str}
+
+Decision rules:
+    - tier="post_now": High quality, asset is ready to generate caption
+    - tier="needs_review": Medium quality or pending items — flag for human review
+    - tier="skip": Low quality or policy issue — do not post""",
+)
+def evaluate_asset(asset_id: str, business_account_id: str) -> dict:
+    ctx = _fetch_asset_context(asset_id, business_account_id)
+    asset = ctx["asset"]
+    account = ctx["account"]
+    perf = ctx["performance"]
+
+    if not asset:
+        return {
+            "quality_score": 0,
+            "tier": "skip",
+            "asset_ready": False,
+            "recommendations": ["Asset not found in database"],
+            "reasoning": "Asset ID not found",
+        }
+
+    # Check if asset has UGC metadata (ugc_content_id on instagram_assets)
+    from_ugc = bool(asset.get("ugc_content_id"))
+    ugc_permission_status = None
+    if from_ugc:
+        from services.supabase_service._ugc import UGCService
+        ugc_permission_status = _get_ugc_permission_status(
+            asset.get("ugc_content_id"), business_account_id
+        )
+
+    # Build context string for LLM (prompt injection)
+    context_str = _assemble_asset_context_string(ctx)
+
+    # LLM makes the quality decision using the context
+    # quality_score: 0-10 scale
+    # tier: post_now / needs_review / skip
+    # For now: simple heuristic until prompt is written
+    selection_score = asset.get("_score", 50)
+    # Map 0-100 selection score to 0-10
+    quality_score = round(min(selection_score / 10, 10), 1)
+
+    if quality_score >= 7.0:
+        tier = "post_now"
+        asset_ready = True
+    elif quality_score >= 5.0:
+        tier = "needs_review"
+        asset_ready = True
+    else:
+        tier = "skip"
+        asset_ready = False
+
+    recommendations = []
+    if not asset.get("description"):
+        recommendations.append("Asset has no description — ensure caption provides context")
+    if ugc_permission_status and ugc_permission_status != "granted":
+        recommendations.append(f"UGC permission status: {ugc_permission_status}")
+
+    return {
+        "quality_score": quality_score,
+        "tier": tier,
+        "asset_ready": asset_ready,
+        "recommendations": recommendations,
+        "reasoning": f"Asset score {quality_score}/10 — {tier}",
+    }
+
+
+# ─── Tool 2: Generate Caption ───────────────────────────────────────────────
+
+@tool(
+    name="generate_caption",
+    description="""Generate Instagram caption text for an asset.
+
+USE THIS TOOL after evaluate_asset returns tier="post_now" or asset_ready=true.
+Generates hook + body + cta + hashtags based on asset and account context.
+
+Args:
+    asset_id: Instagram asset UUID
+    business_account_id: Business account UUID
+    generation_mode: "full" (all parts) or "hook_only" (hook only, for rapid iteration)
+
+Returns JSON:
+    {hook: str, body: str, cta: str, hashtags: list[str],
+     caption_variant: "standard"|"ugc_attributed",
+     reasoning: str}
+
+UGC attribution: If the asset is from ugc_content (from_ugc=true),
+you MUST set caption_variant="ugc_attributed" and include @username attribution in the hook.
+Example hook for UGC: "Repost via @username: This is their amazing content..." """,
+)
+def generate_caption(
+    asset_id: str,
+    business_account_id: str,
+    generation_mode: str = "full",
+) -> dict:
+    ctx = _fetch_asset_context(asset_id, business_account_id)
+    asset = ctx["asset"]
+    account = ctx["account"]
+    perf = ctx["performance"]
+
+    if not asset:
+        return {"error": "Asset not found"}
+
+    from_ugc = bool(asset.get("ugc_content_id"))
+    caption_variant = "ugc_attributed" if from_ugc else "standard"
+
+    # Build full context for prompt
+    context_str = _assemble_asset_context_string(ctx)
+
+    # Fetch LLM-generated caption using the existing generate_and_evaluate prompt
+    # (replace with dedicated prompt once prompts.py is updated)
+    import uuid as _uuid
+    run_id = str(_uuid.uuid4())
+
+    prompt = _build_caption_generation_prompt(
+        asset=asset,
+        account=account,
+        performance=perf,
+        generation_mode=generation_mode,
+        caption_variant=caption_variant,
+    )
+
+    # Use LLMService directly since we haven't yet updated prompts.py
+    from services.llm_service import LLMService
+    try:
+        raw_response = LLMService.invoke(prompt)
+        result = LLMService._parse_json_response(
+            raw_response.content if hasattr(raw_response, "content") else str(raw_response)
+        )
+    except Exception as e:
+        logger.error(f"Caption generation failed: {e}")
+        result = _template_fallback(asset)
+
+    # Extract and validate output
+    hook = result.get("hook", "")
+    body = result.get("body", "")
+    cta = result.get("cta", "")
+    hashtags = result.get("hashtags", [])
+    if isinstance(hashtags, str):
+        hashtags = [t.strip() for t in hashtags.split(",") if t.strip()]
+    hashtags = hashtags[:20]  # Cap at 20 hashtags
+
+    return {
+        "hook": hook,
+        "body": body,
+        "cta": cta,
+        "hashtags": hashtags,
+        "caption_variant": caption_variant,
+        "reasoning": result.get("reasoning", "LLM generated caption"),
+    }
+
+
+# ─── Tool 3: Evaluate Caption ───────────────────────────────────────────────
+
+@tool(
+    name="evaluate_caption",
+    description="""Evaluate the quality of a generated Instagram caption.
+
+USE THIS TOOL after generate_caption returns a draft caption.
+Returns quality score and specific modification suggestions.
+
+Args:
+    caption_text: Full assembled caption text (hook + body + cta + hashtags)
+    account_context: Account info string (username, type, follower count)
+
+Returns JSON:
+    {quality_score: float (0-10), approved: bool,
+     modifications: {hook?: str, body?: str, cta?: str, hashtags?: list[str]},
+     reasoning: str}
+
+Approval threshold: POST_APPROVAL_THRESHOLD config (default 0.6 → score >= 6.0 to approve)
+Modifications: specific suggested changes, or null if no changes needed.""",
+)
+def evaluate_caption(caption_text: str, account_context: str) -> dict:
+    """Evaluate caption quality on 5 criteria: quality (30%), brand (25%),
+    hashtag (20%), engagement (15%), compliance (10%)."""
+    from config import POST_APPROVAL_THRESHOLD
+
+    if not caption_text or not caption_text.strip():
+        return {
+            "quality_score": 0,
+            "approved": False,
+            "modifications": None,
+            "reasoning": "Empty caption",
+        }
+
+    # Hard-rule pre-checks (mirror _apply_hard_rules)
+    hashtags_match = [t.strip() for t in caption_text.split() if t.startswith("#")]
+    reasons = []
+
+    if len(caption_text) > MAX_CAPTION_LENGTH:
+        reasons.append(f"Caption too long ({len(caption_text)} > {MAX_CAPTION_LENGTH})")
+
+    if len(hashtags_match) > MAX_HASHTAG_COUNT:
+        reasons.append(f"Too many hashtags ({len(hashtags_match)} > {MAX_HASHTAG_COUNT})")
+
+    # Simple heuristic scoring until dedicated prompt is written
+    score = 7.0  # Base score
+    if len(caption_text) > 100:
+        score += 0.5
+    if len(caption_text) > 300:
+        score += 0.5
+    if hashtags_match and 3 <= len(hashtags_match) <= 10:
+        score += 1.0
+    if "?" in caption_text:
+        score += 0.5
+    if reasons:
+        score = min(score, 4.0)
+
+    quality_score = round(min(score, 10), 1)
+    approved = quality_score >= (POST_APPROVAL_THRESHOLD * 10)
+
+    modifications = None
+    if reasons:
+        modifications = {"reason": " | ".join(reasons)}
+
+    return {
+        "quality_score": quality_score,
+        "approved": approved,
+        "modifications": modifications,
+        "reasoning": f"Score {quality_score}/10 — {'approved' if approved else 'below threshold'}",
+    }
+
+
+# ─── Tool 4: Publish Content ───────────────────────────────────────────────
+
+@tool(
+    name="publish_content",
+    description="""Validate and prepare a post for publishing.
+
+USE THIS TOOL after evaluate_caption returns approved=true when you want to publish a scheduled post.
+Returns validated job payload — Python enqueues after you confirm in JSON.
+Max caption 2200 characters.
+
+Args:
+    scheduled_post_id: Supabase UUID of the scheduled post
+    business_account_id: Business account UUID
+    image_url: Public URL of the asset image/video
+    caption: Full caption text
+    media_type: IMAGE, VIDEO, CAROUSEL_ALBUM (default: IMAGE)
+    caption_variant: "standard" or "ugc_attributed" (default: standard)
+
+Returns JSON:
+    {validated: true, job_payload: {...}} on success
+    {validated: false, error: "reason"} on failure
+
+UGC posts: If caption_variant="ugc_attributed", Python will verify
+ugc_permissions.status="granted" before enqueuing. Do not set caption_variant
+to "ugc_attributed" unless the original creator has granted permission.""",
+)
+def publish_content(
+    scheduled_post_id: str,
+    business_account_id: str,
+    image_url: str,
+    caption: str,
+    media_type: str = "IMAGE",
+    caption_variant: str = "standard",
+) -> dict:
+    """Validate and return a job payload for publishing."""
+    # Validation
+    if not scheduled_post_id:
+        return {"validated": False, "error": "scheduled_post_id is required"}
+    if not business_account_id:
+        return {"validated": False, "error": "business_account_id is required"}
+    if not image_url:
+        return {"validated": False, "error": "image_url is required"}
+    if not caption or not caption.strip():
+        return {"validated": False, "error": "caption cannot be empty"}
+    if len(caption) > MAX_CAPTION_LENGTH:
+        return {"validated": False, "error": f"Caption exceeds {MAX_CAPTION_LENGTH} chars ({len(caption)})"}
+
+    # Determine action_type and endpoint based on variant
+    if caption_variant == "ugc_attributed":
+        action_type = "repost_ugc"
+        endpoint = "/api/instagram/repost-ugc"
+    else:
+        action_type = "publish_post"
+        endpoint = "/api/instagram/publish-post"
+
+    job_payload = {
+        "job_id": str(_uuid.uuid4()),
+        "action_type": action_type,
+        "priority": "normal",
+        "endpoint": endpoint,
+        "payload": {
+            "scheduled_post_id": scheduled_post_id,
+            "business_account_id": business_account_id,
+            "image_url": image_url,
+            "caption": caption,
+            "media_type": media_type,
+            "caption_variant": caption_variant,
+        },
+        "business_account_id": business_account_id,
+        "idempotency_key": f"post:{scheduled_post_id}",
+        "source": "llm_publish_tool",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "retry_count": 0,
+        "max_retries": 5,
+        "last_error": None,
+    }
+    return {"validated": True, "job_payload": job_payload}
+
+
+# ================================
+# Python-Only Enqueue Helpers
+# ================================
+
+def _enqueue_publish(job_payload: dict) -> dict:
+    """Python-only: enqueue via OutboundQueue after LLM confirms publish_content tool."""
+    from services.outbound_queue import OutboundQueue
+    return OutboundQueue.enqueue(job_payload)
+
+
+def _check_ugc_permission(ugc_content_id: str, business_account_id: str) -> bool:
+    """Check ugc_permissions.status == 'granted' before allowing repost."""
+    if not ugc_content_id:
+        return False
+    from services.supabase_service._ugc import UGCService
+    permissions = UGCService.get_granted_ugc_permissions(business_account_id)
+    return any(p.get("ugc_content_id") == ugc_content_id for p in permissions)
+
+
+def _get_ugc_permission_status(ugc_content_id: str, business_account_id: str) -> str | None:
+    """Get UGC permission status for a specific ugc_content record."""
+    if not ugc_content_id:
+        return None
+    from services.supabase_service._ugc import UGCService
+    permissions = UGCService.get_granted_ugc_permissions(business_account_id)
+    for p in permissions:
+        if p.get("ugc_content_id") == ugc_content_id:
+            return "granted"
+    return "not_found"
+
+
+# ================================
+# Prompt Builder (used by generate_caption tool until prompts.py is updated)
+# ================================
+
+def _build_caption_generation_prompt(
+    asset: dict,
+    account: dict,
+    performance: dict,
+    generation_mode: str,
+    caption_variant: str,
+) -> str:
+    """Build prompt for caption generation using the generate_caption prompt."""
+    from services.prompt_service import PromptService
+
+    now = datetime.now(timezone.utc)
+    asset_tags = asset.get("tags", [])
+    if isinstance(asset_tags, str):
+        asset_tags = [t.strip() for t in asset_tags.split(",") if t.strip()]
+
+    from_ugc = caption_variant == "ugc_attributed"
+    author_username = asset.get("author_username", "")
+    ugc_message = asset.get("message", "")
+
+    # Build UGC instructions based on variant
+    if from_ugc:
+        ugc_instructions = (
+            f"- This is UGC content. You MUST:\n"
+            f"  1. Include '@{author_username}' attribution in the HOOK (e.g., 'Repost via @{author_username}: ...')\n"
+            f"  2. Preserve the creator's original caption text below\n"
+            f"  3. Set caption_variant='ugc_attributed'\n"
+            f"- Original UGC caption: {ugc_message[:500]}"
+        )
+    else:
+        ugc_instructions = "- Standard brand content. caption_variant='standard'."
+
+    template = PromptService.get("generate_caption")
+    return template.format(
+        account_username=account.get("username", "unknown"),
+        account_type=account.get("account_type", "business"),
+        followers_count=account.get("followers_count", 0),
+        asset_title=asset.get("title", "Untitled"),
+        asset_description=asset.get("description", "No description"),
+        asset_tags=", ".join(asset_tags),
+        media_type=asset.get("media_type", "IMAGE"),
+        avg_likes=performance.get("avg_likes", 0),
+        avg_comments=performance.get("avg_comments", 0),
+        avg_engagement_rate=performance.get("avg_engagement_rate", 0),
+        hour=now.hour,
+        day_of_week=now.strftime("%A"),
+        from_ugc=str(from_ugc).lower(),
+        author_username=author_username,
+        message=ugc_message[:500],
+        ugc_instructions=ugc_instructions,
+    )

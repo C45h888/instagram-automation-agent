@@ -55,6 +55,18 @@ from tools.automation_tools import (
     reply_to_comment,    # LLM calls this via bind_tools() — validates + returns job payload
     reply_to_dm,         # LLM calls this via bind_tools() — validates + returns job payload
 )
+from tools.content_tools import (
+    evaluate_asset,      # LLM quality gate for content assets
+    generate_caption,    # LLM caption generation
+    evaluate_caption,    # LLM caption quality evaluation
+    publish_content,     # LLM confirms publish, Python enqueues
+)
+# Oversight tools — scoped tool layer for the Oversight Brain's tool execution bridge.
+# Defined in the @tool-decorated layer, routed through AgentService._execute_tool_calls_async().
+from services.supabase_service._oversight_tools import (
+    get_audit_log_entries,
+    get_run_summary,
+)
 
 ENGAGEMENT_SCOPE_TOOLS = [
     # Supabase read tools — LLM decides when to call each via bind_tools()
@@ -71,10 +83,17 @@ ENGAGEMENT_SCOPE_TOOLS = [
 ]
 
 CONTENT_SCOPE_TOOLS = [
-    get_post_context,
-    get_account_info,
-    get_post_performance,
-    log_decision,
+    # GET tools — LLM fetches context when needed
+    get_post_context,           # Post caption, likes, engagement_rate
+    get_account_info,           # Username, followers, account_type
+    get_post_performance,       # Historical performance benchmarks
+    log_decision,               # Audit logging after each pipeline step
+    # GENERATION tools — LLM calls in sequence during content pipeline
+    evaluate_asset,             # Quality gate: post_now / needs_review / skip
+    generate_caption,           # Text generation: hook + body + cta + hashtags
+    evaluate_caption,           # Quality evaluation of generated caption
+    # EXECUTION tool — LLM confirms via bind_tools(), Python enqueues after
+    publish_content,            # Queue-first publish with UGC permission check
 ]
 
 ATTRIBUTION_SCOPE_TOOLS = [
@@ -83,10 +102,20 @@ ATTRIBUTION_SCOPE_TOOLS = [
     log_decision,
 ]
 
+# Oversight scope — used by OversightBrain's tool execution bridge.
+# The LLM call stays in OversightBrain (llm.astream with <<TOOL_CALL:...>> markers).
+# _execute_tool_calls_async() is called directly from OversightBrain._execute_oversight_tool().
+# get_operational_entries is NOT included — internal-only, auto-injected by OversightBrain.
+OVERSIGHT_SCOPE_TOOLS = [
+    get_audit_log_entries,   # Query audit_log for decision history
+    get_run_summary,         # Get scheduler run statistics
+]
+
 SCOPED_TOOLS = {
     "engagement": ENGAGEMENT_SCOPE_TOOLS,
     "content": CONTENT_SCOPE_TOOLS,
     "attribution": ATTRIBUTION_SCOPE_TOOLS,
+    "oversight": OVERSIGHT_SCOPE_TOOLS,
 }
 
 

@@ -422,6 +422,124 @@ Asset: Office workspace, tags: ["productivity", "work"]
 Respond with ONLY valid JSON:
 {{"hook": "...", "body": "...", "cta": "...", "hashtags": ["tag1", "tag2", ...], "quality_score": 0.0, "approved": true, "modifications": {{"caption": "improved full caption or null", "hashtags": ["improved", "tags", "or", "null"]}}, "reasoning": "brief explanation"}}""",
 
+    "evaluate_asset": """You are an Instagram content quality analyst.
+
+TASK: Evaluate whether a content asset is ready to be posted.
+
+BRAND CONTEXT:
+- Account: @{account_username} ({account_type})
+- Followers: {followers_count}
+
+ASSET TO EVALUATE:
+- Title: {asset_title}
+- Description: {asset_description}
+- Tags: {asset_tags}
+- Media Type: {media_type}
+- Selection Score: {selection_score}/100 (Python-computed: freshness + performance + diversity + upload recency)
+- Last Posted: {days_since_posted} days ago
+
+PERFORMANCE CONTEXT:
+- Avg Likes (recent posts): {avg_likes}
+- Avg Engagement Rate: {avg_engagement_rate}
+
+UGC STATUS:
+- From UGC Content: {from_ugc}
+- UGC Permission Status: {ugc_permission_status}
+
+DECISION TIERS:
+- "post_now": High quality asset, good selection score, ready to generate caption
+- "needs_review": Medium quality, some concerns, or UGC permission pending — flag for human review
+- "skip": Low quality, policy issue, or UGC permission denied — do not post
+
+EVALUATION GUIDance:
+Consider: selection score components, account type, engagement benchmarks, UGC permission validity.
+UGC assets require permission status = "granted" to clear for posting.
+
+OUTPUT SCHEMA:
+{{"quality_score": 0.0-10.0, "tier": "post_now|needs_review|skip", "asset_ready": true|false, "recommendations": ["suggestion1", ...], "reasoning": "why tier was chosen"}}
+
+Respond with ONLY valid JSON:
+{{"quality_score": float, "tier": "post_now|needs_review|skip", "asset_ready": true|false, "recommendations": ["string", ...], "reasoning": "string"}}""",
+
+    "generate_caption": """You are an Instagram content strategist.
+
+TASK: Generate a high-quality Instagram caption for the asset below.
+
+BRAND CONTEXT:
+- Account: @{account_username} ({account_type})
+- Followers: {followers_count}
+
+ASSET TO POST:
+- Title: {asset_title}
+- Description: {asset_description}
+- Tags: {asset_tags}
+- Media Type: {media_type}
+
+PERFORMANCE BENCHMARKS (recent posts):
+- Avg Likes: {avg_likes}
+- Avg Comments: {avg_comments}
+- Avg Engagement Rate: {avg_engagement_rate}
+
+CURRENT TIME:
+- {day_of_week} at {hour}:00
+
+UGC MODE: {from_ugc}
+{ugc_instructions}
+
+ORIGINAL UGC CAPTION (if UGC):
+{message}
+
+CAPTION REQUIREMENTS:
+1. Hook (1-2 lines): Stop the scroll, create curiosity
+2. Body (2-4 lines): Value, story, or connection
+3. CTA (1 line): Specific action (comment, save, click link, tag a friend)
+4. Hashtags: 5-8 relevant tags, mix of broad + niche, max 20
+
+OUTPUT SCHEMA:
+{{"hook": "...", "body": "...", "cta": "...", "hashtags": ["tag1", "tag2", ...], "caption_variant": "standard|ugc_attributed", "reasoning": "why this caption was chosen"}}
+
+Respond with ONLY valid JSON:
+{{"hook": "string", "body": "string", "cta": "string", "hashtags": ["string", ...], "caption_variant": "standard|ugc_attributed", "reasoning": "string"}}""",
+
+    "evaluate_caption": """You are an Instagram content quality reviewer.
+
+TASK: Evaluate the quality of a generated Instagram caption.
+
+ACCOUNT CONTEXT:
+- Account: @{account_username} ({account_type})
+- Followers: {followers_count}
+
+PERFORMANCE BENCHMARKS:
+- Avg Likes: {avg_likes}
+- Avg Comments: {avg_comments}
+
+CAPTION UNDER REVIEW:
+{caption_text}
+
+UGC MODE: {from_ugc}
+{ugc_verification}
+
+EVALUATION CRITERIA (score each 0-10, weighted average):
+- Caption Quality (30%): Strong hook? Clear structure? Compelling CTA?
+- Brand Alignment (25%): Matches brand voice, audience, values?
+- Hashtag Strategy (20%): Relevant, not spammy, good reach mix?
+- Engagement Potential (15%): Will it drive likes, comments, saves?
+- Compliance (10%): Under 2200 chars? 5-8 hashtags? No prohibited content?
+
+HARD RULES (if any fail → approved=false):
+- More than 10 hashtags → reject
+- Caption longer than 2200 characters → reject
+- No CTA detected → flag in reasoning (don't auto-reject)
+
+MODIFICATIONS: If approved=false, provide specific suggested changes.
+If approved=true, set modifications=null.
+
+OUTPUT SCHEMA:
+{{"quality_score": 0.0-10.0, "approved": true|false, "modifications": {{"hook": "string or null", "body": "string or null", "cta": "string or null", "hashtags": ["string"] or null}} or null, "reasoning": "string"}}
+
+Respond with ONLY valid JSON:
+{{"quality_score": float, "approved": true|false, "modifications": {{"hook": "string or null", "body": "string or null", "cta": "string or null", "hashtags": ["string"] or null}} or null, "reasoning": "string"}}""",
+
     "generate_and_evaluate_attribution": """You are a sales attribution quality analyst for an Instagram-driven e-commerce business.
 
 TASK: Evaluate the attribution data below for quality, logical consistency, and potential fraud.
